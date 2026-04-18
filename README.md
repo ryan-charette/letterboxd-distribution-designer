@@ -21,7 +21,9 @@ It is built for people who are just a little too obsessed with having a beautifu
 
 ## Demo
 
-TODO
+```md
+![Letterboxd Distribution Designer demo](./public/demo.png)
+```
 
 ## Getting started
 
