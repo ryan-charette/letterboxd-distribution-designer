@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="16" fill="#0b1016"/>
+  <path d="M12 44c7-22 16-31 26-18 5 7 10 6 14-7" fill="none" stroke="#94a3b8" stroke-width="5" stroke-linecap="round"/>
+  <text x="18" y="56" fill="#65d23a" font-size="18" font-family="Arial, sans-serif">★</text>
+</svg>
