@@ -1,34 +1,39 @@
 # Letterboxd Distribution Designer
 
-Design your perfect Letterboxd ratings chart.
+Design a target Letterboxd rating curve, upload a Letterboxd CSV export, compare films head-to-head, and export updated ratings based on the resulting Elo order.
 
-Letterboxd Distribution Designer is a small interactive web app for shaping a movie-rating distribution. Start with a preset curve, drag the points until the shape feels right, then see how that curve translates into a Letterboxd-style ratings bar chart.
+The app combines two workflows:
 
-It is built for people who are just a little too obsessed with having a beautiful ratings spread.
+- A curve designer for shaping the rating distribution you want
+- An adaptive Elo sorter for deciding which films belong in each rating band
+
+Everything runs in the browser. Uploaded CSV data is parsed locally and session state is saved in local storage.
 
 > This project is independently made and is not affiliated with Letterboxd.
 
 ## Features
 
-- Drag points to reshape the rating curve
-- Move peaks left and right to shift the mode of the distribution
-- Soft-selection moves nearby points with the selected point
-- Automatic handle rebalancing prevents jagged, bunched-up curves
-- Toggle half-star ratings on or off
-- Enter the number of movies and see expected counts per rating
-- Letterboxd-inspired dark UI with green star accents
-- Presets for normal, skewed, and bimodal distributions
+- Drag curve control points to design a target ratings distribution
+- Use normal, left-skewed, right-skewed, and bimodal presets
+- Toggle whole-star or half-star rating bins
+- Preview how the curve maps to rating quotas
+- Upload Letterboxd `watched.csv`, `ratings.csv`, or `diary.csv`
+- Optionally seed Elo from imported ratings when the CSV includes ratings
+- Pick preferred films in head-to-head comparisons
+- Prioritize comparisons near rating cut lines and under-tested films
+- Track match count, coverage, and rating-boundary clarity
+- Export a CSV with rank, assigned rating, Elo, matches, wins, losses, imported rating, and Letterboxd URI
 
 ## Demo
 
 ![Letterboxd Distribution Designer demo](./public/demo.gif)
 
-## Getting started
+## Getting Started
 
 ### Prerequisites
 
 - Node.js 18+
-- npm, pnpm, yarn, or bun
+- npm
 
 ### Install
 
@@ -36,7 +41,7 @@ It is built for people who are just a little too obsessed with having a beautifu
 npm install
 ```
 
-### Run locally
+### Run Locally
 
 ```bash
 npm run dev
@@ -50,38 +55,74 @@ Then open the local URL printed in your terminal.
 npm run build
 ```
 
-### Preview production build
+### Preview Production Build
 
 ```bash
 npm run preview
 ```
 
-## Project structure
+## How To Use
+
+1. Shape the target ratings curve with the preset buttons and draggable curve points.
+2. Keep half-star ratings enabled for the classic 0.5 to 5.0 Letterboxd scale, or disable them for whole-star ratings.
+3. Upload a Letterboxd CSV export.
+4. Choose the film you prefer in each head-to-head pair. You can also use the left and right arrow keys.
+5. Watch the assigned ratings update as Elo changes.
+6. Export the updated ratings CSV when the results are stable enough for your taste.
+
+## Supported CSV Columns
+
+The importer looks for common Letterboxd-style columns. It is intentionally flexible about column names.
+
+- Title: `Name`, `Title`, `Film`, or `Movie`
+- Year: `Year` or `Release Year`
+- Link: `Letterboxd URI`, `URI`, `URL`, or `Link`
+- Watched date: `Watched Date` or `Date`
+- Rating: `Rating`, `Stars`, or `Score`
+
+Rows without a recognizable title are skipped. Duplicate films are deduped by URI when available, otherwise by title and year.
+
+## How Ratings Are Assigned
+
+The curve is sampled into rating-bin probabilities. Those probabilities become quotas for the current film count using largest-remainder rounding, so the assigned counts still add up to the number of imported films.
+
+Imported films are sorted by Elo. The highest Elo films fill the highest rating quota, then the next quota, and so on down the scale.
+
+Pair selection focuses on two kinds of comparisons:
+
+- Boundary comparisons near the cut line between two adjacent rating bands
+- Coverage comparisons for films with too few matches
+
+That means the app does not try to perfectly sort every film from best to worst. It focuses on the comparisons most likely to change the final Letterboxd rating assignment.
+
+## Data And Persistence
+
+- CSV parsing happens in the browser.
+- Imported films, curve settings, and match history are saved in local storage.
+- Use the app's clear/reset controls, or clear site data in your browser, to remove saved state.
+- Exported results are downloaded as `letterboxd-updated-ratings.csv`.
+
+## Project Structure
 
 ```txt
 letterboxd-distribution-designer/
-├─ public/
-│  └─ favicon.svg
-├─ src/
-│  ├─ App.jsx
-│  ├─ index.css
-│  └─ main.jsx
-├─ .gitignore
-├─ index.html
-├─ package.json
-├─ postcss.config.js
-├─ README.md
-├─ tailwind.config.js
-└─ vite.config.js
+|-- public/
+|   |-- demo.gif
+|   `-- favicon.svg
+|-- src/
+|   |-- App.jsx
+|   |-- index.css
+|   |-- letterboxd_elo_rating_app.jsx
+|   `-- main.jsx
+|-- index.html
+|-- package.json
+|-- postcss.config.js
+|-- README.md
+|-- tailwind.config.js
+`-- vite.config.js
 ```
 
-## How it works
-
-The app stores the rating curve as a set of draggable control points. The curve is sampled into a continuous shape, then converted into either 5 whole-star bins or 10 half-star bins.
-
-When you drag a point vertically, nearby points move with it so the curve stays smooth. When you drag a point horizontally, points on either side are redistributed so the handles do not bunch up or stretch too far apart.
-
-The bar chart takes the probability in each bin and multiplies it by the number of movies entered by the user. Counts are rounded using a largest-remainder method so the total still matches the movie count.
+`src/letterboxd_elo_rating_app.jsx` is kept as a compatibility entry point and re-exports the integrated app.
 
 ## License
 
