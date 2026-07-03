@@ -28,7 +28,17 @@ Everything runs in the browser. Uploaded CSV data is parsed locally and session 
 
 ![Letterboxd Distribution Designer demo](./public/demo.gif)
 
-## Getting Started
+## Run Without Installing
+
+You can run the app directly from the downloaded project zip.
+
+1. Click **Code** > **Download ZIP** on GitHub.
+2. Unzip the download.
+3. Open `letterboxd-distribution-designer.html` in your browser.
+
+No Node.js install, terminal commands, or web server are required for normal use.
+
+## Developer Setup
 
 ### Prerequisites
 
@@ -54,6 +64,14 @@ Then open the local URL printed in your terminal.
 ```bash
 npm run build
 ```
+
+### Build The Clickable HTML
+
+```bash
+npm run build:standalone
+```
+
+This regenerates `letterboxd-distribution-designer.html` from the production Vite bundle. Run it after source changes that should be included in the downloadable zip experience.
 
 ### Preview Production Build
 
@@ -109,12 +127,14 @@ letterboxd-distribution-designer/
 |-- public/
 |   |-- demo.gif
 |   `-- favicon.svg
+|-- scripts/
+|   `-- build-standalone.mjs
 |-- src/
 |   |-- App.jsx
 |   |-- index.css
-|   |-- letterboxd_elo_rating_app.jsx
 |   `-- main.jsx
 |-- index.html
+|-- letterboxd-distribution-designer.html
 |-- package.json
 |-- postcss.config.js
 |-- README.md
