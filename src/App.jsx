@@ -586,10 +586,13 @@ function ResultsTable({ ranking }) {
       Title: film.title,
       Year: film.year,
       "Assigned Rating": assignments.get(film.id)?.rating,
-      "Tier Confirmed": assignments.get(film.id)?.confirmed ? "Yes" : "No",
+      "Film Tier At Least 90% Confident": assignments.get(film.id)?.confirmed ? "Yes" : "No",
       "Top Four Position": assignments.get(film.id)?.rank <= 4 ? assignments.get(film.id)?.rank : "",
-      "Top Four Order Confirmed": ranking.topFourFinal ? "Yes" : "No",
-      "Tier Confidence Lower Bound (%)": ranking.confidence,
+      "Top Four Order At Least 90% Confident": ranking.topFourFinal ? "Yes" : "No",
+      "Film Tier Confidence (%)": assignments.get(film.id)?.confidence,
+      "Complete Assigned Tier Confidence (%)": ranking.tiers.find((tier) => tier.rating === assignments.get(film.id)?.rating)?.confidence,
+      "Overall Tier Confidence (%)": ranking.confidence,
+      "Top Four Confidence (%)": ranking.topFourConfidence,
       "Changed From Imported": ratingChanged(film) ? "Yes" : "No",
       Elo: Math.round(film.elo),
       Matches: film.games,
@@ -618,7 +621,7 @@ function ResultsTable({ ranking }) {
               <th className="px-4 py-3">Rank</th>
               <th className="px-4 py-3">Film</th>
               <th className="px-4 py-3">Assigned</th>
-              <th className="px-4 py-3">Tier status</th>
+              <th className="px-4 py-3">Tier confidence</th>
               <th className="px-4 py-3">Changed</th>
               <th className="px-4 py-3">Elo</th>
               <th className="px-4 py-3">Matches</th>
@@ -642,7 +645,7 @@ function ResultsTable({ ranking }) {
                       {ratingText(assignment?.rating)}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-slate-400">{assignment?.confirmed ? "Confirmed" : "Provisional"}</td>
+                  <td className="px-4 py-3 text-slate-400">{assignment?.confidence}% {assignment?.confirmed ? "✓" : ""}</td>
                   <td className="px-4 py-3 text-slate-400">{changed ? "Yes" : film.importedRating ? "No" : "-"}</td>
                   <td className="px-4 py-3 text-slate-300">{Math.round(film.elo)}</td>
                   <td className="px-4 py-3 text-slate-300">{film.games}</td>
@@ -1363,12 +1366,13 @@ export default function App() {
               <div>
                 <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Current quotas</div>
                 <h2 className="mt-1 text-lg font-semibold text-slate-100">Ratings from the curve</h2>
+                {activeFilmCount > 0 && <p className="mt-1 text-xs text-slate-400">Film count · confidence in the complete tier. ✓ marks the 90% target.</p>}
               </div>
               <div className="text-sm text-slate-400">{binCount} steps</div>
             </div>
             <div className="grid gap-2">
               {quotas.map((bucket) => (
-                <div key={bucket.rating} className="grid grid-cols-[64px_1fr_56px] items-center gap-3 text-sm">
+                <div key={bucket.rating} className="grid grid-cols-[64px_1fr_120px] items-center gap-3 text-sm">
                   <div className="font-semibold text-slate-200">{ratingText(bucket.rating)}</div>
                   <div className="h-2 overflow-hidden rounded bg-slate-800">
                     <div
@@ -1377,7 +1381,7 @@ export default function App() {
                     />
                   </div>
                   <div className="text-right text-slate-400">
-                    {activeFilmCount ? `${bucket.quota}${ranking.tiers.find((tier) => tier.rating === bucket.rating)?.finalized ? " ✓" : ""}` : `${bucket.percentage.toFixed(1)}%`}
+                    {activeFilmCount ? `${bucket.quota} · ${ranking.tiers.find((tier) => tier.rating === bucket.rating)?.confidence ?? 100}%${ranking.tiers.find((tier) => tier.rating === bucket.rating)?.finalized ? " ✓" : ""}` : `${bucket.percentage.toFixed(1)}%`}
                   </div>
                 </div>
               ))}
@@ -1419,7 +1423,7 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-8 text-center text-slate-400">
-                    {ranking.conflicts ? "Resolve saved conflicting comparisons to continue." : activeFilmCount < 2 ? "Not enough films to compare." : "All tiers and the top four are finalized."}
+                    {activeFilmCount < 2 ? "Not enough films to compare." : "All tiers and the top four have reached 90% model confidence."}
                   </div>
                 )}
               </section>
@@ -1436,18 +1440,17 @@ export default function App() {
                   <div className="space-y-4">
                     <div>
                       <div className="mb-2 flex justify-between text-sm text-slate-400">
-                        <span>Tier confidence (lower bound)</span><span>{ranking.confidence}%</span>
+                        <span>Estimated tier accuracy</span><span>{ranking.confidence}%</span>
                       </div>
                       <ProgressBar value={ranking.confidence} />
-                      <p className="mt-2 text-xs leading-5 text-slate-400">A uniformly selected film has at least {ranking.confidence}% chance of being in its true tier, assuming consistent, transitive preferences and this target curve. Unresolved films count as zero; this is a conservative bound, not a calibrated probability estimate.</p>
+                      <p className="mt-2 text-xs leading-5 text-slate-400">A randomly selected film has an estimated {ranking.confidence}% chance of being in its true tier under the Elo model. Each tier is finalized at 90% estimated confidence in its complete membership. These are model estimates, not guarantees; earlier tiers can reopen as Elo changes.</p>
                     </div>
-                    <p className="text-sm text-slate-300">{matchCount} comparisons · {ranking.confirmedCount} of {activeFilmCount} tiers confirmed</p>
+                    <p className="text-sm text-slate-300">{matchCount} comparisons · {ranking.confirmedCount} of {activeFilmCount} films have at least 90% tier confidence</p>
                     <div className="text-sm text-slate-300">
                       <h3 className="font-semibold">Your top {Math.min(4, activeFilmCount)}</h3>
-                      <p className="my-2 text-xs text-slate-400">{ranking.topFourFinal ? "Final order confirmed" : "Provisional order — exact positions still being determined"}</p>
-                      <ol className="list-inside list-decimal space-y-1">{sorted.slice(0, 4).map((film) => <li key={film.id}>{filmLabel(film)} {!ranking.conflicts && ranking.bounds.get(film.id)?.min === ranking.bounds.get(film.id)?.max ? "✓" : ""}</li>)}</ol>
+                      <p className="my-2 text-xs text-slate-400">{ranking.topFourConfidence}% confidence in the ordered list · {ranking.topFourFinal ? "90% target reached" : "Provisional"}</p>
+                      <ol className="list-inside list-decimal space-y-1">{sorted.slice(0, 4).map((film) => <li key={film.id}>{filmLabel(film)} {ranking.assignments.get(film.id)?.positionConfidence >= 90 ? "✓" : ""}</li>)}</ol>
                     </div>
-                    {ranking.conflicts > 0 && <p className="text-sm text-amber-200">Saved comparisons contain conflicting preferences. Confidence is withheld. Undo conflicting comparisons or upload the CSV again to start fresh.</p>}
                   </div>
                 </section>
               </aside>
