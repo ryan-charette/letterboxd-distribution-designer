@@ -1,6 +1,21 @@
+import { selectProgressPair } from "./pairing.js";
 const percent = (value) => Math.round(value * 1000) / 10;
-const pairKey = (a, b) => [a, b].sort().join('::');
-const POOL_SIZE = 12;
+export const DEFAULT_CONFIDENCE = 95;
+export function normalizeConfidence(value) {
+  return Number.isFinite(value) ? Math.max(50, Math.min(99, value)) : DEFAULT_CONFIDENCE;
+}
+// Invert the normal CDF once per analysis, not once per film or candidate.
+export function intervalMultiplier(confidenceLevel = DEFAULT_CONFIDENCE) {
+  const probability = (1 + normalizeConfidence(confidenceLevel) / 100) / 2;
+  let low = 0;
+  let high = 4;
+  for (let i = 0; i < 32; i += 1) {
+    const mid = (low + high) / 2;
+    if (normalCdf(mid) < probability) low = mid;
+    else high = mid;
+  }
+  return (low + high) / 2;
+}
 
 export function sortFilms(films) {
   return films.filter((film) => !film.removed).sort((a, b) => b.glicko - a.glicko || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
@@ -19,13 +34,15 @@ function cutAt(sorted, rank) {
   if (rank === sorted.length) return -Infinity;
   return (sorted[rank - 1].glicko + sorted[rank].glicko) / 2;
 }
-function within(film, lower, upper) {
+function within(film, lower, upper, multiplier) {
   // Touching a cut remains unsettled, especially when ratings are tied.
-  return film.glicko - film.rd > lower && film.glicko + film.rd < upper;
+  return film.glicko - multiplier * film.rd > lower && film.glicko + multiplier * film.rd < upper;
 }
 
 // Curve edits reuse the memoized rating order through the presorted option.
-export function analyzeRanking(films, quotas, history = [], { presorted = false } = {}) {
+export function analyzeRanking(films, quotas, history = [], { presorted = false, confidenceLevel = DEFAULT_CONFIDENCE } = {}) {
+  confidenceLevel = normalizeConfidence(confidenceLevel);
+  const multiplier = intervalMultiplier(confidenceLevel);
   const sorted = presorted ? films : sortFilms(films);
   const assignments = new Map();
   const tiers = [];
@@ -41,13 +58,14 @@ export function analyzeRanking(films, quotas, history = [], { presorted = false 
     let settledCount = 0;
     for (let i = start; i < cursor; i += 1) {
       const film = sorted[i];
-      const confirmed = within(film, lower, upper);
+      const confirmed = within(film, lower, upper, multiplier);
       const probability = normalCdf((upper - film.glicko) / film.rd) - normalCdf((lower - film.glicko) / film.rd);
       if (confirmed) { confirmedCount += 1; settledCount += 1; }
       probabilitySum += probability;
       assignments.set(film.id, {
         rating: bucket.rating, rank: i + 1, confirmed, confidence: percent(probability), lower, upper,
-        positionConfirmed: within(film, cutAt(sorted, i + 1), cutAt(sorted, i)),
+        intervalLower: film.glicko - multiplier * film.rd, intervalUpper: film.glicko + multiplier * film.rd,
+        positionConfirmed: within(film, cutAt(sorted, i + 1), cutAt(sorted, i), multiplier),
       });
     }
     tiers.push({ ...bucket, start, end: cursor, lower, upper, settledCount,
@@ -68,43 +86,32 @@ export function analyzeRanking(films, quotas, history = [], { presorted = false 
         if (cut > 0 && cut < sorted.length && margin < worstMargin) { boundary = cut; worstMargin = margin; }
       }
     }
-    stage = `Settling ${activeTier.rating}-star films: ${activeTier.settledCount} of ${activeTier.quota} rating ± RD intervals fit inside the tier.`;
+    stage = `Settling ${activeTier.rating}-star films: ${activeTier.settledCount} of ${activeTier.quota} ${confidenceLevel}% intervals fit inside the tier.`;
   } else if (!topFourFinal) {
     const index = top.findIndex((film) => !assignments.get(film.id).positionConfirmed);
     const film = sorted[index];
     boundary = index > 0 && cutAt(sorted, index) - film.glicko < film.glicko - cutAt(sorted, index + 1) ? index : index + 1;
-    stage = `Refining your top four: ${topFourSettledCount} of ${top.length} positions settled by rating ± RD.`;
+    stage = `Refining your top four: ${topFourSettledCount} of ${top.length} positions settled using ${confidenceLevel}% intervals.`;
   }
-  let nextPair = null;
-  let candidateCount = 0;
+  let selection = { nextPair: null, candidateCount: 0, lookaheadCount: 0, expectedProgress: 0 };
   if (boundary > 0 && boundary < sorted.length) {
-    const cut = cutAt(sorted, boundary);
-    // Bounded pools, selected in a linear scan, include uncertain distant
-    // challengers without constructing every cross-boundary pair.
-    const left = [];
-    const right = [];
-    const insert = (pool, film, distance) => {
-      const score = distance / film.rd;
-      const at = pool.findIndex((item) => score < item.score);
-      if (at < 0) { if (pool.length < POOL_SIZE) pool.push({ film, score }); }
-      else { pool.splice(at, 0, { film, score }); if (pool.length > POOL_SIZE) pool.pop(); }
+    const scoreOrder = order => {
+      const cut = cutAt(order, boundary);
+      const a = order[boundary - 1];
+      const b = order[boundary];
+      const leftMargin = (a.glicko - cut) / (multiplier * a.rd);
+      const rightMargin = (cut - b.glicko) / (multiplier * b.rd);
+      const settled = Number(leftMargin > 1) + Number(rightMargin > 1);
+      const clarity = Math.min(1, leftMargin) + Math.min(1, rightMargin);
+      return { settled, clarity };
     };
-    sorted.forEach((film, index) => insert(index < boundary ? left : right, film, Math.abs(film.glicko - cut)));
-    const skips = new Map();
-    for (const match of history) if (match.skipped) {
-      const key = pairKey(match.aId, match.bId);
-      skips.set(key, (skips.get(key) || 0) + 1);
-    }
-    let bestScore = -Infinity;
-    for (const { film: a } of left) for (const { film: b } of right) {
-      candidateCount += 1;
-      const gap = (a.glicko - b.glicko) / Math.hypot(a.rd, b.rd);
-      const score = -gap * gap / 2 - (skips.get(pairKey(a.id, b.id)) || 0) * 2;
-      if (score > bestScore) { bestScore = score; nextPair = { left: a, right: b }; }
-    }
-    if (history.length % 2) nextPair = { left: nextPair.right, right: nextPair.left };
+    const cut = cutAt(sorted, boundary);
+    selection = selectProgressPair(sorted, boundary, history, {
+      multiplier, scoreOrder,
+      focusIds: new Set(sorted.filter(film => Math.abs(film.glicko - cut) <= multiplier * film.rd).map(film => film.id)),
+    });
   }
   return { sorted, quotas, assignments, tiers, topFourFinal, topFourSettledCount, topFourCount: top.length,
     confirmedCount, confidence: sorted.length ? percent(probabilitySum / sorted.length) : 0,
-    nextPair, stage, activeTier, boundary, candidateCount };
+    ...selection, stage, activeTier, boundary, confidenceLevel, multiplier };
 }
