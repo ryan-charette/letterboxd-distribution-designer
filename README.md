@@ -1,11 +1,11 @@
 # Letterboxd Distribution Designer
 
-Design a target Letterboxd rating curve, upload a Letterboxd CSV export, compare films head-to-head, and export updated ratings based on the resulting Elo order.
+Design a target Letterboxd rating curve, upload a Letterboxd CSV export, compare films head-to-head, and export updated ratings based on your comparison results.
 
 The app combines two workflows:
 
 - A curve designer for shaping the rating distribution you want
-- An adaptive Elo sorter for deciding which films belong in each rating band
+- A tier-by-tier comparison sorter for deciding which films belong in each rating band
 
 Everything runs in the browser. Uploaded CSV data is parsed locally and session state is saved in local storage.
 
@@ -20,8 +20,9 @@ Everything runs in the browser. Uploaded CSV data is parsed locally and session 
 - Upload Letterboxd `watched.csv`, `ratings.csv`, or `diary.csv`
 - Optionally seed Elo from imported ratings when the CSV includes ratings
 - Pick preferred films in head-to-head comparisons
-- Prioritize comparisons near rating cut lines and under-tested films
-- Track match count, coverage, and rating-boundary clarity
+- Finalize rating tiers from five stars downward before moving to the next tier
+- Determine the exact ordered top four, even when several favorites share a tier
+- Track confirmed tier placements and a conservative confidence bound
 - Export a CSV with rank, assigned rating, Elo, matches, wins, losses, imported rating, and Letterboxd URI
 
 ## Demo
@@ -85,8 +86,9 @@ npm run preview
 2. Keep half-star ratings enabled for the classic 0.5 to 5.0 Letterboxd scale, or disable them for whole-star ratings.
 3. Upload a Letterboxd CSV export.
 4. Choose the film you prefer in each head-to-head pair. You can also use the left and right arrow keys.
-5. Watch the assigned ratings update as Elo changes.
-6. Export the updated ratings CSV when the results are stable enough for your taste.
+5. Follow the current tier until its membership is confirmed, then move down the scale. Zero-quota tiers are skipped.
+6. Once the tiers are finalized, finish any comparisons needed to order your top four.
+7. Export the updated ratings CSV, including provisional/confirmed status, top-four positions, and the tier-confidence lower bound.
 
 ## Supported CSV Columns
 
@@ -104,14 +106,25 @@ Rows without a recognizable title are skipped. Duplicate films are deduped by UR
 
 The curve is sampled into rating-bin probabilities. Those probabilities become quotas for the current film count using largest-remainder rounding, so the assigned counts still add up to the number of imported films.
 
-Imported films are sorted by Elo. The highest Elo films fill the highest rating quota, then the next quota, and so on down the scale.
+Each answer establishes a preference constraint: the winner ranks ahead of the loser. The app also uses transitivity (if A beats B and B beats C, A ranks ahead of C). Provisional results respect these constraints; Elo and title break ties where your answers do not yet determine an order. Imported ratings seed Elo, but do not count as evidence of a confirmed placement.
 
-Pair selection focuses on two kinds of comparisons:
+Comparisons focus exclusively on the earliest unfinished rating tier, starting with the highest nonempty quota. Every film remains eligible to challenge that tier until comparison evidence rules it out. A tier is finalized only when its entire membership is the same in every ranking consistent with your answers. Further comparisons cannot change finalized tiers unless you undo an answer or change the target curve. The app then works down the remaining tiers and finally resolves any undetermined positions in the ordered top four (or all films when fewer than four are imported).
 
-- Boundary comparisons near the cut line between two adjacent rating bands
-- Coverage comparisons for films with too few matches
+### What confidence means
 
-That means the app does not try to perfectly sort every film from best to worst. It focuses on the comparisons most likely to change the final Letterboxd rating assignment.
+For each film, the app calculates its best and worst possible rank across all orders consistent with your comparisons. A film's tier is confirmed when both limits fall inside its assigned quota. The confidence display is the percentage of imported films with confirmed tiers, rounded down to one decimal place.
+
+This is a **lower bound**: a uniformly selected film has at least this chance of being assigned its true tier, assuming your answers reflect consistent, transitive preferences and the chosen target distribution. Unresolved films count as zero even though some may already be correctly placed. It is not a calibrated probability estimate and does not model mistaken or changing answers. Tier confidence can reach 100% before the top-four order is finalized, because ordering films within a tier does not affect their ratings.
+
+Skipping a pair adds no preference evidence; it favors another eligible pair within the same tier. If only one comparison remains, it will reappear. Undo removes the last answer or skip. Curve edits recompute quotas and confirmation from the saved evidence. Older sessions with contradictory answers show a warning and withhold confidence; undo the contradictory answers or reupload the CSV to restart.
+
+### Validation
+
+```bash
+npm test
+```
+
+Tests cover convergence to known preferences, descending tier priority, finalized-tier stability, exact top-four order, skips, undo, quota changes, and conflicting saved history. An exhaustive small-set test checks rank bounds and the confidence lower bound against every compatible true ordering.
 
 ## Data And Persistence
 
@@ -142,7 +155,7 @@ letterboxd-distribution-designer/
 `-- vite.config.js
 ```
 
-`src/letterboxd_elo_rating_app.jsx` is kept as a compatibility entry point and re-exports the integrated app.
+`src/ranking.js` contains the comparison constraints, tier confirmation, confidence bound, and pair selection. `tests/ranking.test.mjs` validates the ranking behavior.
 
 ## License
 
