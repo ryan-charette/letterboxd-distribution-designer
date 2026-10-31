@@ -1,3 +1,4 @@
+import { analyzeRanking } from "./ranking.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const numberFormatter = new Intl.NumberFormat();
@@ -274,10 +275,6 @@ function hashString(input) {
   return Math.abs(hash >>> 0);
 }
 
-function deterministicJitter(key, salt = 0) {
-  return (hashString(`${key}:${salt}`) % 1000) / 1000;
-}
-
 function stableId(parts) {
   return parts
     .filter(Boolean)
@@ -398,30 +395,9 @@ function parseFilmsFromRows(rows, seedFromExistingRatings) {
   return films;
 }
 
-function sortedFilms(films) {
-  return [...films]
-    .filter((film) => !film.removed)
-    .sort((a, b) => b.elo - a.elo || b.games - a.games || a.title.localeCompare(b.title));
-}
-
-function assignmentsFor(films, distribution) {
-  const sorted = sortedFilms(films);
-  const quotas = quotasFor(sorted.length, distribution);
-  const assignments = new Map();
-  let cursor = 0;
-
-  for (const bucket of quotas) {
-    for (let i = 0; i < bucket.quota && cursor < sorted.length; i += 1) {
-      assignments.set(sorted[cursor].id, {
-        rating: bucket.rating,
-        rank: cursor + 1,
-        bucketPercentage: bucket.percentage,
-      });
-      cursor += 1;
-    }
-  }
-
-  return { sorted, quotas, assignments };
+function assignmentsFor(films, distribution, history = []) {
+  const active = films.filter((film) => !film.removed);
+  return analyzeRanking(active, quotasFor(active.length, distribution), history);
 }
 
 function expectedScore(a, b) {
@@ -433,167 +409,6 @@ function kFactor(film) {
   if (film.games < 15) return 36;
   if (film.games < 35) return 28;
   return 20;
-}
-
-function pairKey(aId, bId) {
-  return [aId, bId].sort().join("::");
-}
-
-function historyCounts(history) {
-  const counts = new Map();
-  for (const match of history) {
-    const key = pairKey(match.aId, match.bId);
-    counts.set(key, (counts.get(key) || 0) + 1);
-  }
-  return counts;
-}
-
-function nearestByElo(target, sorted, blockedIds = new Set()) {
-  let best = null;
-  let bestDistance = Infinity;
-  for (const candidate of sorted) {
-    if (candidate.id === target.id || blockedIds.has(candidate.id)) continue;
-    const distance = Math.abs(candidate.elo - target.elo);
-    if (distance < bestDistance) {
-      best = candidate;
-      bestDistance = distance;
-    }
-  }
-  return best;
-}
-
-function chooseNextPair(films, distribution, history) {
-  const sorted = sortedFilms(films);
-  if (sorted.length < 2) return null;
-
-  const quotas = quotasFor(sorted.length, distribution);
-  const counts = historyCounts(history);
-  const boundaries = [];
-  let cursor = 0;
-  for (const bucket of quotas) {
-    cursor += bucket.quota;
-    if (cursor > 0 && cursor < sorted.length) boundaries.push(cursor);
-  }
-
-  const candidates = [];
-  const windowSize = clamp(Math.ceil(sorted.length * 0.06), 2, 12);
-  const salt = history.length;
-
-  for (const boundary of boundaries) {
-    const leftStart = Math.max(0, boundary - windowSize);
-    const rightEnd = Math.min(sorted.length, boundary + windowSize);
-
-    for (let i = leftStart; i < boundary; i += 1) {
-      for (let j = boundary; j < rightEnd; j += 1) {
-        const a = sorted[i];
-        const b = sorted[j];
-        const repeats = counts.get(pairKey(a.id, b.id)) || 0;
-        if (repeats >= 3) continue;
-
-        const eloDiff = Math.abs(a.elo - b.elo);
-        const closeness = 1 - clamp(eloDiff / 450, 0, 1);
-        const uncertainty = 1 / (1 + a.games) + 1 / (1 + b.games);
-        const boundaryProximity =
-          1 -
-          clamp((Math.abs(i + 0.5 - boundary) + Math.abs(j + 0.5 - boundary)) / (2 * windowSize), 0, 1);
-        const staleBonus = Math.min(a.lastPlayedAt || 0, b.lastPlayedAt || 0) ? 0 : 0.25;
-        const score =
-          boundaryProximity * 4 +
-          closeness * 2.2 +
-          uncertainty * 1.9 +
-          staleBonus -
-          repeats * 2.4 +
-          deterministicJitter(`${a.id}-${b.id}`, salt) * 0.35;
-
-        candidates.push({ a, b, reason: "boundary", boundary, score });
-      }
-    }
-  }
-
-  const lowGameFilms = sorted.filter((film) => film.games < 3).slice(0, Math.min(30, sorted.length));
-  for (const film of lowGameFilms) {
-    const opponent = nearestByElo(film, sorted);
-    if (!opponent) continue;
-    const repeats = counts.get(pairKey(film.id, opponent.id)) || 0;
-    if (repeats >= 2) continue;
-    candidates.push({
-      a: film,
-      b: opponent,
-      reason: "coverage",
-      score:
-        7 +
-        (3 - film.games) * 1.5 -
-        repeats * 2 +
-        deterministicJitter(`${film.id}-${opponent.id}`, salt) * 0.3,
-    });
-  }
-
-  if (!candidates.length) {
-    for (let i = 0; i < sorted.length - 1; i += 1) {
-      const a = sorted[i];
-      const b = sorted[i + 1];
-      const repeats = counts.get(pairKey(a.id, b.id)) || 0;
-      candidates.push({
-        a,
-        b,
-        reason: "nearest",
-        score: 3 - repeats + deterministicJitter(`${a.id}-${b.id}`, salt) * 0.25,
-      });
-    }
-  }
-
-  candidates.sort((x, y) => y.score - x.score);
-  const choice = candidates[0];
-  if (!choice) return null;
-
-  const flip = deterministicJitter(`${choice.a.id}-${choice.b.id}`, salt) > 0.5;
-  return flip
-    ? { left: choice.b, right: choice.a, reason: choice.reason, boundary: choice.boundary }
-    : { left: choice.a, right: choice.b, reason: choice.reason, boundary: choice.boundary };
-}
-
-function computeReadiness(films, distribution, history) {
-  const sorted = sortedFilms(films);
-  if (sorted.length < 2) return { score: 0, coverage: 0, boundary: 0, unresolved: [] };
-
-  const quotas = quotasFor(sorted.length, distribution);
-  const boundaries = [];
-  let cursor = 0;
-  for (let i = 0; i < quotas.length; i += 1) {
-    cursor += quotas[i].quota;
-    if (cursor > 0 && cursor < sorted.length) {
-      boundaries.push({ index: cursor, above: quotas[i].rating, below: quotas[i + 1]?.rating });
-    }
-  }
-
-  const coverage = sorted.filter((film) => film.games >= 3).length / sorted.length;
-  const windowSize = clamp(Math.ceil(sorted.length * 0.04), 2, 8);
-  const unresolved = [];
-  const boundaryScores = boundaries.map((boundary) => {
-    const left = sorted.slice(Math.max(0, boundary.index - windowSize), boundary.index);
-    const right = sorted.slice(boundary.index, Math.min(sorted.length, boundary.index + windowSize));
-    const nearby = [...left, ...right];
-    const avgGames = nearby.reduce((sum, film) => sum + film.games, 0) / Math.max(1, nearby.length);
-    const gamesFactor = clamp(avgGames / 4, 0, 1);
-    const gap = Math.max(0, (sorted[boundary.index - 1]?.elo || 0) - (sorted[boundary.index]?.elo || 0));
-    const gapFactor = clamp(gap / 120, 0, 1);
-    const score = gamesFactor * 0.62 + gapFactor * 0.38;
-    if (score < 0.7) unresolved.push({ ...boundary, score, gap, avgGames });
-    return score;
-  });
-
-  const boundary = boundaryScores.length
-    ? boundaryScores.reduce((sum, score) => sum + score, 0) / boundaryScores.length
-    : 1;
-  const progressTowardUsefulSample = clamp(history.length / Math.max(8, Math.ceil(sorted.length * 3)), 0, 1);
-  const score = (coverage * 0.32 + boundary * 0.48 + progressTowardUsefulSample * 0.2) * 100;
-
-  return {
-    score: Math.round(score),
-    coverage: Math.round(coverage * 100),
-    boundary: Math.round(boundary * 100),
-    unresolved,
-  };
 }
 
 function csvEscape(value) {
@@ -752,8 +567,8 @@ function FilmChoiceCard({ film, assignment, onPick, side }) {
   );
 }
 
-function ResultsTable({ films, distribution }) {
-  const { sorted, assignments } = useMemo(() => assignmentsFor(films, distribution), [films, distribution]);
+function ResultsTable({ ranking }) {
+  const { sorted, assignments } = ranking;
 
   function ratingChanged(film) {
     const assigned = Number(assignments.get(film.id)?.rating);
@@ -771,6 +586,10 @@ function ResultsTable({ films, distribution }) {
       Title: film.title,
       Year: film.year,
       "Assigned Rating": assignments.get(film.id)?.rating,
+      "Tier Confirmed": assignments.get(film.id)?.confirmed ? "Yes" : "No",
+      "Top Four Position": assignments.get(film.id)?.rank <= 4 ? assignments.get(film.id)?.rank : "",
+      "Top Four Order Confirmed": ranking.topFourFinal ? "Yes" : "No",
+      "Tier Confidence Lower Bound (%)": ranking.confidence,
       "Changed From Imported": ratingChanged(film) ? "Yes" : "No",
       Elo: Math.round(film.elo),
       Matches: film.games,
@@ -799,6 +618,7 @@ function ResultsTable({ films, distribution }) {
               <th className="px-4 py-3">Rank</th>
               <th className="px-4 py-3">Film</th>
               <th className="px-4 py-3">Assigned</th>
+              <th className="px-4 py-3">Tier status</th>
               <th className="px-4 py-3">Changed</th>
               <th className="px-4 py-3">Elo</th>
               <th className="px-4 py-3">Matches</th>
@@ -822,6 +642,7 @@ function ResultsTable({ films, distribution }) {
                       {ratingText(assignment?.rating)}
                     </span>
                   </td>
+                  <td className="px-4 py-3 text-slate-400">{assignment?.confirmed ? "Confirmed" : "Provisional"}</td>
                   <td className="px-4 py-3 text-slate-400">{changed ? "Yes" : film.importedRating ? "No" : "-"}</td>
                   <td className="px-4 py-3 text-slate-300">{Math.round(film.elo)}</td>
                   <td className="px-4 py-3 text-slate-300">{film.games}</td>
@@ -861,9 +682,8 @@ export default function App() {
   const densitySamples = useMemo(() => sampleDensity(points, 280), [points]);
   const probabilities = useMemo(() => getBinProbabilities(points, binCount), [points, binCount]);
   const distribution = useMemo(() => distributionFromProbabilities(probabilities, binCount), [probabilities, binCount]);
-  const { assignments, quotas, sorted } = useMemo(() => assignmentsFor(films, distribution), [films, distribution]);
-  const nextPair = useMemo(() => chooseNextPair(films, distribution, history), [films, distribution, history]);
-  const readiness = useMemo(() => computeReadiness(films, distribution, history), [films, distribution, history]);
+  const ranking = useMemo(() => assignmentsFor(films, distribution, history), [films, distribution, history]);
+  const { assignments, quotas, sorted, nextPair } = ranking;
   const distributionMovieCount = sorted.length || Math.max(0, Number(sampleSize) || 0);
   const counts = useMemo(
     () => largestRemainderRound(probabilities, distributionMovieCount),
@@ -1079,75 +899,74 @@ export default function App() {
       const loserId = winnerId === nextPair.left.id ? nextPair.right.id : nextPair.left.id;
       const now = Date.now();
 
-      setFilms((current) => {
-        const winner = current.find((film) => film.id === winnerId);
-        const loser = current.find((film) => film.id === loserId);
-        if (!winner || !loser) return current;
+      const current = films;
+      const winner = current.find((film) => film.id === winnerId);
+      const loser = current.find((film) => film.id === loserId);
+      if (!winner || !loser) return;
 
-        const expectedWinner = expectedScore(winner, loser);
-        const expectedLoser = expectedScore(loser, winner);
-        const winnerK = kFactor(winner);
-        const loserK = kFactor(loser);
-        const winnerAfter = Math.round(winner.elo + winnerK * (1 - expectedWinner));
-        const loserAfter = Math.round(loser.elo + loserK * (0 - expectedLoser));
+      const expectedWinner = expectedScore(winner, loser);
+      const expectedLoser = expectedScore(loser, winner);
+      const winnerK = kFactor(winner);
+      const loserK = kFactor(loser);
+      const winnerAfter = Math.round(winner.elo + winnerK * (1 - expectedWinner));
+      const loserAfter = Math.round(loser.elo + loserK * (0 - expectedLoser));
 
-        const updated = current.map((film) => {
-          if (film.id === winnerId) {
-            return {
-              ...film,
-              elo: winnerAfter,
-              games: film.games + 1,
-              wins: film.wins + 1,
-              lastPlayedAt: now,
-            };
-          }
-          if (film.id === loserId) {
-            return {
-              ...film,
-              elo: loserAfter,
-              games: film.games + 1,
-              losses: film.losses + 1,
-              lastPlayedAt: now,
-            };
-          }
-          return film;
-        });
-
-        setHistory((currentHistory) => [
-          ...currentHistory,
-          {
-            aId: nextPair.left.id,
-            bId: nextPair.right.id,
-            winnerId,
-            loserId,
-            before: {
-              [winnerId]: {
-                elo: winner.elo,
-                games: winner.games,
-                wins: winner.wins,
-                losses: winner.losses,
-                lastPlayedAt: winner.lastPlayedAt,
-              },
-              [loserId]: {
-                elo: loser.elo,
-                games: loser.games,
-                wins: loser.wins,
-                losses: loser.losses,
-                lastPlayedAt: loser.lastPlayedAt,
-              },
-            },
-            after: {
-              [winnerId]: winnerAfter,
-              [loserId]: loserAfter,
-            },
-            createdAt: now,
-          },
-        ]);
-
-        return updated;
+      const updated = current.map((film) => {
+        if (film.id === winnerId) {
+          return {
+            ...film,
+            elo: winnerAfter,
+            games: film.games + 1,
+            wins: film.wins + 1,
+            lastPlayedAt: now,
+          };
+        }
+        if (film.id === loserId) {
+          return {
+            ...film,
+            elo: loserAfter,
+            games: film.games + 1,
+            losses: film.losses + 1,
+            lastPlayedAt: now,
+          };
+        }
+        return film;
       });
+
+      setFilms(updated);
+      setHistory((currentHistory) => [
+        ...currentHistory,
+        {
+          aId: nextPair.left.id,
+          bId: nextPair.right.id,
+          winnerId,
+          loserId,
+          before: {
+            [winnerId]: {
+              elo: winner.elo,
+              games: winner.games,
+              wins: winner.wins,
+              losses: winner.losses,
+              lastPlayedAt: winner.lastPlayedAt,
+            },
+            [loserId]: {
+              elo: loser.elo,
+              games: loser.games,
+              wins: loser.wins,
+              losses: loser.losses,
+              lastPlayedAt: loser.lastPlayedAt,
+            },
+          },
+          after: {
+            [winnerId]: winnerAfter,
+            [loserId]: loserAfter,
+          },
+          createdAt: now,
+        },
+      ]);
+
     },
-    [nextPair],
+    [nextPair, films],
   );
 
   useEffect(() => {
@@ -1418,10 +1237,10 @@ export default function App() {
 
                 <div className="rounded-lg border border-slate-800 bg-slate-950/30 px-4 py-3">
                   <div className="mb-2 flex justify-between text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    <span>Clarity</span>
-                    <span>{readiness.score}%</span>
+                    <span>Tier confidence</span>
+                    <span>{ranking.confidence}%</span>
                   </div>
-                  <ProgressBar value={readiness.score} />
+                  <ProgressBar value={ranking.confidence} />
                 </div>
               </div>
             </div>
@@ -1558,7 +1377,7 @@ export default function App() {
                     />
                   </div>
                   <div className="text-right text-slate-400">
-                    {activeFilmCount ? bucket.quota : `${bucket.percentage.toFixed(1)}%`}
+                    {activeFilmCount ? `${bucket.quota}${ranking.tiers.find((tier) => tier.rating === bucket.rating)?.finalized ? " ✓" : ""}` : `${bucket.percentage.toFixed(1)}%`}
                   </div>
                 </div>
               ))}
@@ -1582,6 +1401,7 @@ export default function App() {
                   </div>
                 </div>
 
+                <p className="mb-4 text-sm text-slate-400">{ranking.stage}</p>
                 {nextPair ? (
                   <div key={`${nextPair.left.id}-${nextPair.right.id}-${history.length}`} className="grid gap-4 md:grid-cols-2">
                     <FilmChoiceCard
@@ -1599,7 +1419,7 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-8 text-center text-slate-400">
-                    Not enough films to compare.
+                    {ranking.conflicts ? "Resolve saved conflicting comparisons to continue." : activeFilmCount < 2 ? "Not enough films to compare." : "All tiers and the top four are finalized."}
                   </div>
                 )}
               </section>
@@ -1616,46 +1436,24 @@ export default function App() {
                   <div className="space-y-4">
                     <div>
                       <div className="mb-2 flex justify-between text-sm text-slate-400">
-                        <span>Overall clarity</span>
-                        <span>{readiness.score}%</span>
+                        <span>Tier confidence (lower bound)</span><span>{ranking.confidence}%</span>
                       </div>
-                      <ProgressBar value={readiness.score} />
+                      <ProgressBar value={ranking.confidence} />
+                      <p className="mt-2 text-xs leading-5 text-slate-400">A uniformly selected film has at least {ranking.confidence}% chance of being in its true tier, assuming consistent, transitive preferences and this target curve. Unresolved films count as zero; this is a conservative bound, not a calibrated probability estimate.</p>
                     </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="rounded-lg border border-slate-800 bg-slate-950/30 px-4 py-3">
-                        <div className="text-2xl font-semibold text-slate-100">{matchCount}</div>
-                        <div className="text-xs text-slate-500">Elo matches</div>
-                      </div>
-                      <div className="rounded-lg border border-slate-800 bg-slate-950/30 px-4 py-3">
-                        <div className="text-2xl font-semibold text-slate-100">{readiness.coverage}%</div>
-                        <div className="text-xs text-slate-500">3+ match coverage</div>
-                      </div>
+                    <p className="text-sm text-slate-300">{matchCount} comparisons · {ranking.confirmedCount} of {activeFilmCount} tiers confirmed</p>
+                    <div className="text-sm text-slate-300">
+                      <h3 className="font-semibold">Your top {Math.min(4, activeFilmCount)}</h3>
+                      <p className="my-2 text-xs text-slate-400">{ranking.topFourFinal ? "Final order confirmed" : "Provisional order — exact positions still being determined"}</p>
+                      <ol className="list-inside list-decimal space-y-1">{sorted.slice(0, 4).map((film) => <li key={film.id}>{filmLabel(film)} {!ranking.conflicts && ranking.bounds.get(film.id)?.min === ranking.bounds.get(film.id)?.max ? "✓" : ""}</li>)}</ol>
                     </div>
-                    {readiness.unresolved.length ? (
-                      <div className="rounded-lg border border-amber-900/70 bg-amber-950/25 p-4 text-sm text-amber-100">
-                        <div className="font-semibold">Low-signal cut lines</div>
-                        <div className="mt-2 space-y-1 text-amber-100/80">
-                          {readiness.unresolved.slice(0, 4).map((item) => (
-                            <div key={`${item.above}-${item.below}`} className="flex justify-between gap-3">
-                              <span>
-                                {ratingText(item.above)} / {ratingText(item.below)}
-                              </span>
-                              <span>gap {Math.round(item.gap)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="rounded-lg border border-emerald-900/70 bg-emerald-950/25 p-4 text-sm text-emerald-100">
-                        Rating boundaries look stable.
-                      </div>
-                    )}
+                    {ranking.conflicts > 0 && <p className="text-sm text-amber-200">Saved comparisons contain conflicting preferences. Confidence is withheld. Undo conflicting comparisons or upload the CSV again to start fresh.</p>}
                   </div>
                 </section>
               </aside>
             </div>
 
-            <ResultsTable films={films} distribution={distribution} />
+            <ResultsTable ranking={ranking} />
           </div>
         ) : null}
       </div>
