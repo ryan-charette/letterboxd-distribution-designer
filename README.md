@@ -21,8 +21,9 @@ Everything runs in the browser. Uploaded CSV data is parsed locally and session 
 - Optionally seed Glicko from imported ratings when the CSV includes ratings
 - Pick preferred films in head-to-head comparisons
 - Finalize rating tiers from five stars downward before moving to the next tier
-- Identify the ordered top four using rating ± RD intervals, even when several favorites share a tier
-- Settle films when their rating ± RD lies entirely within their tier
+- Identify the ordered top four using adjustable confidence intervals, even when several favorites share a tier
+- Settle films when their selected confidence interval lies entirely within their tier
+- Adjust confidence from 50% to 99% to trade comparison effort for interval strictness
 - Export a CSV with rank, assigned rating, Glicko, RD, tier probability, matches, wins, losses, imported rating, and Letterboxd URI
 
 ## Demo
@@ -86,7 +87,7 @@ npm run preview
 2. Keep half-star ratings enabled for the classic 0.5 to 5.0 Letterboxd scale, or disable them for whole-star ratings.
 3. Upload a Letterboxd CSV export.
 4. Choose the film you prefer in each head-to-head pair. You can also use the left and right arrow keys.
-5. Follow the current tier until all its films have settled rating ± RD intervals, then move down the scale. Zero-quota tiers are skipped.
+5. Follow the current tier until all its films have settled confidence intervals, then move down the scale. Zero-quota tiers are skipped.
 6. Once the tiers are finalized, finish any comparisons needed to order your top four.
 7. Export the updated ratings CSV, including per-film tier probabilities, top-four positions, and overall estimated tier accuracy.
 
@@ -112,17 +113,19 @@ Unseeded films begin at rating 1500 with RD 350. When imported-rating seeding is
 
 ### Settling tiers and the top four
 
-A tier cutoff is the midpoint of the Glicko ratings immediately above and below its quota boundary. Empty tiers are skipped; the highest and lowest tiers extend to positive and negative infinity respectively. A film is settled when its **rating minus RD and rating plus RD both lie strictly inside its assigned tier**. Touching a cutoff remains unsettled, including tied ratings. The app finalizes a tier when all its assigned films meet that rule, then moves downward. Tier progress is the percentage of assigned films whose intervals are settled.
+A tier cutoff is the midpoint of the Glicko ratings immediately above and below its quota boundary. Empty tiers are skipped; the highest and lowest tiers extend to positive and negative infinity respectively. A film is settled when its **selected central confidence interval lies strictly inside its assigned tier**. The settlement-confidence slider ranges from 50% to 99% and defaults to 95%. The interval is `rating ± z * RD`, where `z` is the standard normal quantile for the selected confidence. For example, 95% uses approximately `±1.96 RD`, 90% uses `±1.645 RD`, and 80% uses `±1.282 RD`. Lower confidence narrows the interval and relaxes the stopping rule; it does not change the underlying ratings, RD, or recorded answers. Touching a cutoff remains unsettled, including tied ratings. The app finalizes a tier when all its assigned films meet that rule, then moves downward. Tier progress is the percentage of assigned films whose intervals are settled.
 
-Pair selection focuses on unsettled films in the highest unfinished tier and plausible challengers across the relevant cutoff. Each side contributes up to 12 candidates based on distance to the cutoff relative to RD; at most 144 pairs are scored. This includes uncertain challengers without requiring favorites to beat every distant low-rated film.
+Pair selection focuses on the highest unfinished tier's relevant cutoff. It gathers nearby candidates on both sides plus reliable low-RD anchors. A bounded shortlist of at most 16 pairs is previewed under both possible answers, using simultaneous Glicko updates and Glicko's predictive outcome probability. The updated films are reinserted into the rating order and cutoffs are recomputed, so predicted progress includes boundary movement and possible changes in membership.
 
-After tiers settle, the ordered top four uses the same interval rule within each individual rank's midpoint boundaries, including the fourth/fifth cutoff. For fewer than four films, all available positions are considered. These are interval-settlement criteria, not 90% probability thresholds. Earlier tiers can reopen after new answers, undo, or a curve edit. Skips change pair preference without updating ratings or RD.
+The progress proxy combines the expected number of boundary films whose intervals clear the cutoff with the expected reduction in their normalized interval overlap. Expected RD reduction and anchor reliability break close scores. Same-side calibration requires a border film facing an anchor with at most half its RD. Conservative locality and minimum-improvement guards retain the closest cross-cut pair when speculative alternatives offer little benefit. This is bounded heuristic lookahead, not a globally optimal comparison policy, and it does not guarantee fewer comparisons on every library.
+
+After tiers settle, the ordered top four uses the same interval rule within each individual rank's midpoint boundaries, including the fourth/fifth cutoff. For fewer than four films, all available positions are considered. Both tier and top-four settlement use the slider setting. The selected per-rating interval confidence is not a joint probability guarantee for an entire tier or the ordered top-four list. Earlier tiers can reopen after new answers, undo, or a curve edit. Skips change pair preference without updating ratings or RD.
 
 ### What the confidence percentage means
 
 The separate estimated tier-accuracy display retains the original interpretation: the estimated probability that a uniformly selected film is in its correct tier. For a film with rating `r`, RD `d`, and current tier boundaries `L` and `U`, its tier probability is `Phi((U-r)/d) - Phi((L-r)/d)`, where `Phi` is the standard normal CDF. Overall accuracy averages these probabilities. This is a normal approximation conditional on the current point-estimated cutoffs; it does not include uncertainty in the cutoffs themselves and is not an empirically calibrated guarantee.
 
-RD is one standard deviation, so containment of rating ± RD is deliberately separate from the former 90% threshold. The interface and CSV distinguish model probabilities from interval-settlement progress.
+RD is one standard deviation; rating ± RD is approximately a 68% central interval, while rating ± 1.96 RD is approximately 95%. The interface and CSV distinguish the selected settlement threshold, the selected interval bounds, model probabilities, and interval-settlement progress. The slider preference is saved with the session; sessions without one start at 95%. Changing the slider recalculates settlement without replaying answers. Raising confidence can reopen tiers.
 
 ### Saved sessions and performance
 
@@ -130,7 +133,9 @@ Older saved sessions migrate automatically by replaying their comparison history
 
 Ranking no longer runs Monte Carlo simulations. The film order is memoized, tier analysis scans the list, candidate pair scoring is bounded, and results render 100 films per page while CSV export still includes every film. Curve sampling sorts control points once per batch. Saving is debounced by 250 ms and flushed when leaving the page, avoiding full-history serialization on every curve movement.
 
-A local Node benchmark on a synthetic 2,000-film library measured median ranking computation at about 486 ms for the preceding simulation implementation and 1 ms for this implementation. This measures computation, not end-to-end browser frame rate. Run `npm run benchmark` to measure the current implementation on the same synthetic library.
+A local Node benchmark on a synthetic 2,000-film library measured median ranking computation at about 486 ms for the preceding simulation implementation and roughly 3 ms for the current bounded-lookahead implementation. This measures computation, not end-to-end browser frame rate. Run `npm run benchmark` to measure the current implementation on the same synthetic library.
+
+`npm run benchmark:comparisons` compares the former closest-gap policy and the new policy at 95%, plus the new policy at 80%, across five fixed synthetic libraries. It reports comparison counts and correct top-tier membership after both tiers settle. The test uses deterministic preferences and explicit seeded rating errors/RDs, not real-user data. Results are mixed: expected-progress pairing can save comparisons or take more, while lower confidence generally reduces the stopping effort in these scenarios. Treat this as a reproducible diagnostic, not evidence of calibrated accuracy or universal comparison savings.
 
 ### Validation
 
@@ -138,7 +143,7 @@ A local Node benchmark on a synthetic 2,000-film library measured median ranking
 npm test
 ```
 
-Tests verify the published Glicko numerical example, simultaneous participant updates, RD-aware undo and saved-session migration, strict interval containment, analytic probabilities, descending tier priority, distant-challenger avoidance, top-four settlement, bounded pair selection, and rendered results pagination.
+Tests verify the published Glicko numerical example, simultaneous participant updates, RD-aware undo and saved-session migration, strict interval containment, analytic probabilities, descending tier priority, distant-challenger avoidance, top-four settlement, bounded pair selection, predictive outcome weights, confidence quantiles and persistence, slider rendering, lower-confidence settlement, reliable-anchor availability, and rendered results pagination.
 
 ## Data And Persistence
 
@@ -169,7 +174,7 @@ letterboxd-distribution-designer/
 `-- vite.config.js
 ```
 
-`src/glicko.js` implements rating updates and saved-session migration. `src/ranking.js` contains interval settlement, analytic tier probabilities, and pair selection. `tests/ranking.test.mjs` validates the ranking behavior.
+`src/glicko.js` implements rating updates and saved-session migration. `src/ranking.js` contains interval settlement and analytic tier probabilities. `src/pairing.js` contains bounded expected-progress selection and anchor candidates. `tests/ranking.test.mjs` validates the ranking behavior.
 
 ## License
 

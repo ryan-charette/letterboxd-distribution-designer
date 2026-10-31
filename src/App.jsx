@@ -1,5 +1,5 @@
 import { initialGlicko, recordComparison, migrateSession } from "./glicko.js";
-import { analyzeRanking, sortFilms } from "./ranking.js";
+import { analyzeRanking, sortFilms, DEFAULT_CONFIDENCE, normalizeConfidence } from "./ranking.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const numberFormatter = new Intl.NumberFormat();
@@ -508,7 +508,7 @@ function UploadPanel({ onChooseFile, onDropFile, seedFromExistingRatings, setSee
   );
 }
 
-function FilmChoiceCard({ film, assignment, onPick, side }) {
+function FilmChoiceCard({ film, assignment, onPick, side, confidenceLevel = DEFAULT_CONFIDENCE }) {
   return (
     <button
       type="button"
@@ -546,6 +546,7 @@ function FilmChoiceCard({ film, assignment, onPick, side }) {
             <div className="mt-1 text-sm font-semibold text-slate-100">#{assignment?.rank ?? "-"}</div>
           </div>
         </div>
+        <p className="mt-3 text-xs text-slate-500">{confidenceLevel}% interval: {Math.round(assignment?.intervalLower)}–{Math.round(assignment?.intervalUpper)}</p>
       </div>
     </button>
   );
@@ -555,6 +556,15 @@ function persistSession(snapshot) {
   if (!snapshot) return;
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot)); }
   catch { /* Storage may be unavailable or full. */ }
+}
+
+export function ConfidenceControl({confidenceLevel, multiplier, onChange}) {
+  return <section className="rounded-lg border border-slate-800 bg-[#11161d] p-5">
+    <label htmlFor="settlement-confidence" className="flex justify-between gap-4 text-sm font-semibold text-slate-100"><span>Settlement confidence</span><span>{confidenceLevel}%</span></label>
+    <input id="settlement-confidence" type="range" min="50" max="99" step="1" value={confidenceLevel} onChange={event=>onChange(Number(event.target.value))} className="mt-4 w-full accent-lime-400" aria-describedby="confidence-help" />
+    <div className="flex justify-between text-xs text-slate-500"><span>50% · Faster</span><span>99% · More cautious</span></div>
+    <p id="confidence-help" className="mt-3 text-xs leading-5 text-slate-400">Settle films when rating ± {multiplier.toFixed(2)} RD fits inside their tier. Lower confidence usually needs fewer comparisons, with less reliable placements. Default: 95%.</p>
+  </section>;
 }
 
 export const ResultsTable = React.memo(function ResultsTable({ ranking }) {
@@ -586,6 +596,9 @@ export const ResultsTable = React.memo(function ResultsTable({ ranking }) {
       "Film Tier Confidence (%)": assignments.get(film.id)?.confidence,
       "Assigned Tier Settled (%)": ranking.tiers.find((tier) => tier.rating === assignments.get(film.id)?.rating)?.progress,
       "Overall Tier Confidence (%)": ranking.confidence,
+      "Interval Confidence Level (%)": ranking.confidenceLevel,
+      "Selected Interval Lower": assignments.get(film.id)?.intervalLower,
+      "Selected Interval Upper": assignments.get(film.id)?.intervalUpper,
       "Rating Deviation": film.rd,
       "Rating Minus RD": film.glicko - film.rd,
       "Rating Plus RD": film.glicko + film.rd,
@@ -647,7 +660,7 @@ export const ResultsTable = React.memo(function ResultsTable({ ranking }) {
                   </td>
                   <td className="px-4 py-3 text-slate-400">{assignment?.confidence}%<span className="block text-xs text-slate-500">{assignment?.confirmed ? "Interval settled" : "Interval crosses cut"}</span></td>
                   <td className="px-4 py-3 text-slate-400">{changed ? "Yes" : film.importedRating ? "No" : "-"}</td>
-                  <td className="px-4 py-3 text-slate-300">{Math.round(film.glicko)} ± {Math.round(film.rd)}</td>
+                  <td className="px-4 py-3 text-slate-300">{Math.round(film.glicko)} ± {Math.round(film.rd)}<span className="block text-xs text-slate-500">{ranking.confidenceLevel}%: {Math.round(assignment?.intervalLower)}–{Math.round(assignment?.intervalUpper)}</span></td>
                   <td className="px-4 py-3 text-slate-300">{film.games}</td>
                   <td className="px-4 py-3 text-slate-300">
                     {film.wins}-{film.losses}
@@ -677,6 +690,7 @@ export default function App() {
   const [history, setHistory] = useState([]);
   const [seedFromExistingRatings, setSeedFromExistingRatings] = useState(true);
   const [uploadError, setUploadError] = useState("");
+  const [confidenceLevel, setConfidenceLevel] = useState(DEFAULT_CONFIDENCE);
   const [hydrated, setHydrated] = useState(false);
   const pendingSaveRef = useRef(null);
 
@@ -688,7 +702,7 @@ export default function App() {
   const probabilities = useMemo(() => getBinProbabilities(points, binCount), [points, binCount]);
   const distribution = useMemo(() => distributionFromProbabilities(probabilities, binCount), [probabilities, binCount]);
   const orderedFilms = useMemo(() => sortFilms(films), [films]);
-  const ranking = useMemo(() => analyzeRanking(orderedFilms, quotasFor(orderedFilms.length, distribution), history, { presorted: true }), [orderedFilms, distribution, history]);
+  const ranking = useMemo(() => analyzeRanking(orderedFilms, quotasFor(orderedFilms.length, distribution), history, { presorted: true, confidenceLevel }), [orderedFilms, distribution, history, confidenceLevel]);
   const { assignments, quotas, sorted, nextPair } = ranking;
   const distributionMovieCount = sorted.length || Math.max(0, Number(sampleSize) || 0);
   const counts = useMemo(
@@ -740,6 +754,7 @@ export default function App() {
       if (Number.isFinite(saved?.sampleSize)) setSampleSize(saved.sampleSize);
       if (saved?.films?.length) setFilms(saved.films);
       if (saved?.history?.length) setHistory(saved.history);
+      setConfidenceLevel(normalizeConfidence(saved?.confidenceLevel));
       if (typeof saved?.seedFromExistingRatings === "boolean") setSeedFromExistingRatings(saved.seedFromExistingRatings);
     } catch {
       // Ignore incompatible saved state.
@@ -750,10 +765,10 @@ export default function App() {
 
   useEffect(() => {
     if (!hydrated) return;
-    pendingSaveRef.current = { schemaVersion: 2, points, allowHalfStars, presetName, sampleSize, films, history, seedFromExistingRatings };
+    pendingSaveRef.current = { schemaVersion: 2, points, allowHalfStars, presetName, sampleSize, films, history, seedFromExistingRatings, confidenceLevel };
     const timer = setTimeout(() => persistSession(pendingSaveRef.current), 250);
     return () => clearTimeout(timer);
-  }, [hydrated, points, allowHalfStars, presetName, sampleSize, films, history, seedFromExistingRatings]);
+  }, [hydrated, points, allowHalfStars, presetName, sampleSize, films, history, seedFromExistingRatings, confidenceLevel]);
 
   useEffect(() => {
     const flush = () => persistSession(pendingSaveRef.current);
@@ -1193,6 +1208,8 @@ export default function App() {
             </div>
           </section>
 
+          <ConfidenceControl confidenceLevel={confidenceLevel} multiplier={ranking.multiplier} onChange={setConfidenceLevel} />
+
           <UploadPanel
             onChooseFile={() => fileInputRef.current?.click()}
             onDropFile={handleFile}
@@ -1310,7 +1327,7 @@ export default function App() {
               <div>
                 <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Current quotas</div>
                 <h2 className="mt-1 text-lg font-semibold text-slate-100">Ratings from the curve</h2>
-                {activeFilmCount > 0 && <p className="mt-1 text-xs text-slate-400">Film count · rating ± RD intervals settled. ✓ marks a fully settled tier.</p>}
+                {activeFilmCount > 0 && <p className="mt-1 text-xs text-slate-400">Film count · {confidenceLevel}% intervals settled. ✓ marks a fully settled tier.</p>}
               </div>
               <div className="text-sm text-slate-400">{binCount} steps</div>
             </div>
@@ -1356,12 +1373,14 @@ export default function App() {
                       film={nextPair.left}
                       assignment={assignments.get(nextPair.left.id)}
                       onPick={handlePick}
+                      confidenceLevel={confidenceLevel}
                       side="Choice A"
                     />
                     <FilmChoiceCard
                       film={nextPair.right}
                       assignment={assignments.get(nextPair.right.id)}
                       onPick={handlePick}
+                      confidenceLevel={confidenceLevel}
                       side="Choice B"
                     />
                   </div>
@@ -1387,7 +1406,7 @@ export default function App() {
                         <span>Estimated tier accuracy</span><span>{ranking.confidence}%</span>
                       </div>
                       <ProgressBar value={ranking.confidence} />
-                      <p className="mt-2 text-xs leading-5 text-slate-400">A randomly selected film has an estimated {ranking.confidence}% chance of being in its correct tier under the Glicko normal approximation and current tier cutoffs. A film is settled when its rating ± RD fits entirely inside its tier. This interval rule is not a 90% guarantee; earlier tiers can reopen as ratings change.</p>
+                      <p className="mt-2 text-xs leading-5 text-slate-400">A randomly selected film has an estimated {ranking.confidence}% chance of being in its correct tier under the Glicko normal approximation and current tier cutoffs. A film is settled when its selected {confidenceLevel}% interval fits entirely inside its tier. This setting controls interval width, not a guarantee for the entire tier; earlier tiers can reopen as ratings change.</p>
                     </div>
                     <p className="text-sm text-slate-300">{matchCount} comparisons · {ranking.confirmedCount} of {activeFilmCount} films have settled tier intervals</p>
                     <div className="text-sm text-slate-300">

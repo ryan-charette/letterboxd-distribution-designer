@@ -7,6 +7,11 @@ const MIN_RD = 30;
 const Q = Math.log(10) / 400;
 const g = (rd) => 1 / Math.sqrt(1 + 3 * Q * Q * rd * rd / (Math.PI * Math.PI));
 
+// Predictive outcome probability accounts for both participants' uncertainty.
+export function expectedGlickoScore(a, b) {
+  return 1 / (1 + 10 ** (-g(Math.hypot(a.rd, b.rd)) * (a.glicko - b.glicko) / 400));
+}
+
 export function initialGlicko(film, seedFromExistingRatings = true) {
   const seeded = seedFromExistingRatings && Number(film.importedRating) > 0;
   return { glicko: INITIAL_RATING + (seeded ? (Number(film.importedRating) - 3) * 115 : 0), rd: seeded ? SEEDED_RD : INITIAL_RD };

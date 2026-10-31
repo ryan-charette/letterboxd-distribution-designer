@@ -1,7 +1,8 @@
+import { selectProgressPair } from '../src/pairing.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeRanking, sortFilms, normalCdf } from '../src/ranking.js';
-import { initialGlicko, updateGlicko, recordComparison, migrateSession } from '../src/glicko.js';
+import { analyzeRanking, sortFilms, normalCdf, intervalMultiplier, normalizeConfidence } from '../src/ranking.js';
+import { initialGlicko, updateGlicko, recordComparison, migrateSession, expectedGlickoScore } from '../src/glicko.js';
 const film = (id, glicko, rd = 100) => ({id, title:id, glicko, rd, games:0, wins:0, losses:0, lastPlayedAt:null});
 const quotas = [{rating:5,quota:1},{rating:4,quota:1},{rating:1,quota:1}];
 
@@ -56,15 +57,15 @@ test('legacy migration replays answers and rebuilds reversible Glicko snapshots'
 });
 
 test('tier cutoffs use quota midpoints; only fully contained RD intervals settle', () => {
-  const ranking = analyzeRanking([film('a',1800,100),film('b',1500,150),film('c',1200,100)],quotas);
+  const ranking = analyzeRanking([film('a',1800,50),film('b',1500,100),film('c',1200,50)],quotas);
   assert.equal(ranking.tiers[0].lower,1650);
   assert.equal(ranking.tiers[1].upper,1650);
   assert.equal(ranking.tiers[1].lower,1350);
   assert.equal(ranking.assignments.get('a').confirmed,true);
-  assert.equal(ranking.assignments.get('b').confirmed,false); // touches both cuts
+  assert.equal(ranking.assignments.get('b').confirmed,false); // selected 95% interval crosses both cuts
   assert.equal(ranking.activeTier.rating,4);
   assert.equal(ranking.assignments.get('c').confirmed,true);
-  const narrower = analyzeRanking([film('a',1800,100),film('b',1500,149),film('c',1200,100)],quotas);
+  const narrower = analyzeRanking([film('a',1800,50),film('b',1500,75),film('c',1200,50)],quotas);
   assert.equal(narrower.tiers[1].finalized,true);
 });
 
@@ -77,7 +78,7 @@ test('normal tier probability is distinct from interval settlement and averages 
 
 test('five-star attention moves down and avoids 200 distant low-rated films', () => {
   const low=Array.from({length:200},(_,i)=>film(`low-${i}`,1000,150));
-  const ranking=analyzeRanking([film('a',1900,100),film('b',1600,100),film('c',1590,100),...low],
+  const ranking=analyzeRanking([film('a',2100,100),film('b',1600,100),film('c',1590,100),...low],
     [{rating:5,quota:1},{rating:4,quota:1},{rating:3,quota:1},{rating:1,quota:200}]);
   assert.equal(ranking.tiers[0].finalized,true);
   assert.equal(ranking.activeTier.rating,4);
@@ -124,9 +125,74 @@ test('quota changes and rating changes can reopen earlier tiers', () => {
   assert.equal(analyzeRanking(items.map(f=>f.id==='a'?{...f,glicko:1510}:f),quotas).tiers[0].finalized,false);
 });
 
-test('large libraries score at most 144 pairs rather than a quadratic cross product', () => {
+test('large libraries use a bounded shortlist with at most 16 two-outcome lookaheads', () => {
   const items=Array.from({length:10000},(_,i)=>film(`film-${i}`,2000-i/10,350));
   const ranking=analyzeRanking(items,[{rating:5,quota:5000},{rating:1,quota:5000}]);
   assert.ok(ranking.nextPair);
-  assert.ok(ranking.candidateCount<=144);
+  assert.ok(ranking.candidateCount<=528);
+  assert.ok(ranking.lookaheadCount<=16);
+});
+
+test('confidence levels produce standard central intervals, default to 95%, and clamp safely', () => {
+  assert.ok(Math.abs(intervalMultiplier(95)-1.959964)<0.00001);
+  assert.ok(Math.abs(intervalMultiplier(90)-1.644854)<0.00001);
+  assert.ok(Math.abs(intervalMultiplier(99)-2.575829)<0.00001);
+  assert.equal(normalizeConfidence(undefined),95);
+  assert.equal(normalizeConfidence(NaN),95);
+  assert.equal(normalizeConfidence(0),50);
+  assert.equal(normalizeConfidence(100),99);
+});
+
+test('lower confidence can settle sooner without changing ratings or estimated accuracy', () => {
+  const items=[film('a',1650,100),film('b',1350,100)];
+  const before=structuredClone(items);
+  const bins=[{rating:5,quota:1},{rating:1,quota:1}];
+  const low=analyzeRanking(items,bins,[],{confidenceLevel:68});
+  const high=analyzeRanking(items,bins,[],{confidenceLevel:95});
+  assert.equal(low.tiers[0].finalized,true);
+  assert.equal(high.tiers[0].finalized,false);
+  assert.equal(low.confidence,high.confidence);
+  assert.equal(low.assignments.get('a').intervalLower>high.assignments.get('a').intervalLower,true);
+  assert.deepEqual(items,before);
+  const restored=analyzeRanking(items,bins,[],{confidenceLevel:95});
+  assert.deepEqual(restored,high);
+});
+
+test('a nearby low-RD anchor remains available alongside uncertain challengers', () => {
+  const items=[film('a-target',1500,350),film('b-uncertain',1450,350),film('c-anchor',1500,30)];
+  const before=structuredClone(items);
+  const ranking=analyzeRanking(items,[{rating:5,quota:1},{rating:1,quota:2}]);
+  assert.ok([ranking.nextPair.left.id,ranking.nextPair.right.id].includes('c-anchor'));
+  assert.ok(ranking.expectedProgress>0);
+  assert.deepEqual(items,before);
+});
+
+test('lookahead previews both outcomes from unchanged inputs and uses Glicko weights', () => {
+  const a=film('a',1500,350);const b=film('b',1500,30);
+  const inputs=[a,b];const before=structuredClone(inputs);const previews=[];
+  const result=selectProgressPair(inputs,1,[],{
+    multiplier:intervalMultiplier(95),focusIds:new Set(['a','b']),
+    scoreOrder:order=>{previews.push(structuredClone(order));return {settled:Number(order[0].id==='a'&&order[0].glicko>1500),clarity:0};},
+  });
+  assert.equal(result.lookaheadCount,1);
+  assert.equal(previews.length,3);
+  assert.ok(Math.abs(result.expectedSettled-expectedGlickoScore(a,b))<1e-12);
+  assert.deepEqual(inputs,before);
+  for(const order of previews.slice(1)) {
+    assert.ok(order[0].glicko>=order[1].glicko);
+    assert.ok(order.find(film=>film.id==='a').rd<a.rd);
+  }
+});
+
+test('the Glicko predictive probability matches the published uncertain-opponent example', () => {
+  const probability=expectedGlickoScore(film('a',1400,80),film('b',1500,150));
+  assert.ok(Math.abs(probability-0.376)<0.001);
+  assert.ok(Math.abs(probability+expectedGlickoScore(film('b',1500,150),film('a',1400,80))-1)<1e-12);
+});
+
+test('the saved confidence preference survives migration without replaying Glicko history', () => {
+  const saved={schemaVersion:2,confidenceLevel:80,films:[film('a',1600,100)],history:[]};
+  assert.equal(migrateSession(saved),saved);
+  assert.equal(migrateSession(saved).confidenceLevel,80);
+  assert.equal(normalizeConfidence(migrateSession({...saved,confidenceLevel:undefined}).confidenceLevel),95);
 });

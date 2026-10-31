@@ -6,7 +6,7 @@ import { renderToString } from 'react-dom/server';
 import { analyzeRanking } from '../src/ranking.js';
 
 await build({ logLevel:'silent', build:{ssr:'src/App.jsx',outDir:'node_modules/.cache/render-tests',emptyOutDir:true} });
-const {default:App,ResultsTable} = await import('../node_modules/.cache/render-tests/App.js');
+const {default:App,ResultsTable,ConfidenceControl} = await import('../node_modules/.cache/render-tests/App.js');
 test('initial app renders without browser state', () => {
   assert.match(renderToString(React.createElement(App)), /Tier confidence/);
 });
@@ -20,4 +20,17 @@ test('a large result set renders only one page and exposes Glicko RD', () => {
   assert.match(html,/Next/);
   assert.match(html,/Export CSV/);
   assert.ok(!body.includes('Film 100<'));
+});
+
+test('confidence slider exposes limits, default, and the selected RD multiplier', () => {
+  const html=renderToString(React.createElement(ConfidenceControl,{confidenceLevel:95,multiplier:1.959963,onChange:()=>{}}));
+  assert.match(html,/type="range"/);
+  assert.match(html,/min="50"/);
+  assert.match(html,/max="99"/);
+  assert.match(html,/value="95"/);
+  assert.match(html,/1.96/);
+  assert.match(html,/Default: 95%/);
+  const lower=renderToString(React.createElement(ConfidenceControl,{confidenceLevel:80,multiplier:1.281552,onChange:()=>{}}));
+  assert.match(lower,/value="80"/);
+  assert.match(lower,/1.28/);
 });
