@@ -1,108 +1,119 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeRanking } from '../src/ranking.js';
-const films = (n) => Array.from({ length: n }, (_, i) => ({ id: String(i), title: `Film ${i}`, elo: 1500 + i * 20 }));
-const win = (a, b) => ({ winnerId: String(a), loserId: String(b) });
-const quotas = [{ rating: 5, quota: 2 }, { rating: 4, quota: 2 }, { rating: 3, quota: 2 }];
+import { analyzeRanking, eloDeviation } from '../src/ranking.js';
+const film = (id, elo, games = 0) => ({ id, title: id, elo, games });
+const twoTiers = [{ rating: 5, quota: 1 }, { rating: 1, quota: 1 }];
+const lows = () => Array.from({length: 200}, (_, i) => film(`low-${i}`, 1270));
 
-test('tier-first comparisons converge to true tiers and exact top four', () => {
-  for (let seed = 1; seed <= 30; seed += 1) {
-    let state = seed;
-    const random = () => ((state = (state * 1664525 + 1013904223) >>> 0) / 2 ** 32);
-    const items = films(6).sort(() => random() - 0.5);
-    const truth = new Map(items.map((film, i) => [film.id, i]));
-    const history = [];
-    const locked = new Map();
-    let ranking;
-    for (let step = 0; step <= 16; step += 1) {
-      ranking = analyzeRanking(items, quotas, history);
-      for (const [id, rating] of locked) assert.equal(ranking.assignments.get(id).rating, rating);
-      for (const tier of ranking.tiers.filter((tier) => tier.finalized)) {
-        for (const film of ranking.sorted.slice(tier.start, tier.end)) locked.set(film.id, tier.rating);
-      }
-      const pair = ranking.nextPair;
-      if (!pair) break;
-      const unfinished = ranking.tiers.find((tier) => !tier.finalized);
-      if (unfinished) {
-        assert.ok(ranking.assignments.get(pair.left.id).rank <= unfinished.end);
-        assert.ok(ranking.assignments.get(pair.right.id).rank > unfinished.end);
-      }
-      const [a, b] = [pair.left.id, pair.right.id];
-      history.push(truth.get(a) < truth.get(b) ? win(a, b) : win(b, a));
-    }
-    assert.equal(ranking.nextPair, null);
-    assert.equal(ranking.confidence, 100);
-    assert.equal(ranking.topFourFinal, true);
-    assert.deepEqual(ranking.sorted.slice(0, 4).map((f) => f.id), items.slice(0, 4).map((f) => f.id));
-    for (const film of items) assert.equal(ranking.assignments.get(film.id).rating, [5, 5, 4, 4, 3, 3][truth.get(film.id)]);
+// Independent approximation of the standard normal CDF for a two-film oracle.
+function cdf(x) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const tail = Math.exp(-x * x / 2) / Math.sqrt(2 * Math.PI) * t *
+    (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  return x >= 0 ? 1 - tail : tail;
+}
+
+test('sampled confidence agrees with analytic two-film normal probabilities', () => {
+  for (const gap of [0, 50, 150, 300]) {
+    const a = film('favorite', 1500 + gap);
+    const b = film('challenger', 1500);
+    const ranking = analyzeRanking([a, b], twoTiers);
+    const expected = cdf(gap / Math.hypot(eloDeviation(a), eloDeviation(b))) * 100;
+    assert.ok(Math.abs(ranking.tiers[0].confidence - expected) < 4, `${gap}: ${ranking.tiers[0].confidence} vs ${expected}`);
+    assert.equal(ranking.confidence, ranking.tiers[0].confidence);
   }
 });
 
-test('confidence is a valid bound across every compatible true order', () => {
-  const items = films(6);
-  const history = [win(0, 1), win(1, 2), win(0, 3), win(4, 5)];
-  const ranking = analyzeRanking(items, quotas, history);
-  function permutations(list) {
-    return list.length ? list.flatMap((x) => permutations(list.filter((y) => y !== x)).map((tail) => [x, ...tail])) : [[]];
-  }
-  const orders = permutations(items.map((f) => f.id)).filter((order) => history.every((m) => order.indexOf(m.winnerId) < order.indexOf(m.loserId)));
-  for (const film of items) {
-    assert.equal(ranking.bounds.get(film.id).min, Math.min(...orders.map((o) => o.indexOf(film.id) + 1)));
-    assert.equal(ranking.bounds.get(film.id).max, Math.max(...orders.map((o) => o.indexOf(film.id) + 1)));
-  }
-  for (const order of orders) {
-    const correct = order.filter((id, i) => ranking.assignments.get(id).rating === [5, 5, 4, 4, 3, 3][i]).length;
-    assert.ok(correct / 6 * 100 >= ranking.confidence);
-    for (const [id, assignment] of ranking.assignments) if (assignment.confirmed) {
-      assert.equal(assignment.rating, [5, 5, 4, 4, 3, 3][order.indexOf(id)]);
-    }
-  }
-});
-
-test('skips change pairs without adding evidence; undo restores ranking', () => {
-  const items = films(6);
-  const initial = analyzeRanking(items, quotas);
-  const pair = initial.nextPair;
-  const skip = { aId: pair.left.id, bId: pair.right.id, skipped: true };
-  const skipped = analyzeRanking(items, quotas, [skip]);
-  assert.notDeepEqual(skipped.nextPair, pair);
-  assert.equal(skipped.confidence, initial.confidence);
-  assert.deepEqual(skipped.bounds, initial.bounds);
-  const history = [win(pair.left.id, pair.right.id)];
-  history.pop();
-  assert.deepEqual(analyzeRanking(items, quotas, history), initial);
-});
-
-test('single tier still determines ordered top four; tiny imports finish', () => {
-  for (let n = 0; n <= 6; n += 1) {
-    const items = films(n);
-    const history = [];
-    let ranking;
-    for (let i = 0; i <= n * n; i += 1) {
-      ranking = analyzeRanking(items, [{ rating: 5, quota: n }], history);
-      if (!ranking.nextPair) break;
-      const a = ranking.nextPair.left.id;
-      const b = ranking.nextPair.right.id;
-      history.push(Number(a) < Number(b) ? win(a, b) : win(b, a));
-    }
-    assert.equal(ranking.topFourFinal, true);
-    assert.equal(ranking.nextPair, null);
-    assert.deepEqual(ranking.sorted.slice(0, 4).map((f) => f.id), Array.from({length: Math.min(n, 4)}, (_, i) => String(i)));
-  }
-});
-
-test('curve edits recompute certification, imported Elo alone is not evidence', () => {
-  const items = films(6);
-  assert.equal(analyzeRanking(items, quotas).confidence, 0);
-  const history = [win(0, 2), win(0, 3), win(0, 4), win(0, 5), win(1, 2), win(1, 3), win(1, 4), win(1, 5)];
-  const ranking = analyzeRanking(items, quotas, history);
+test('a well-separated favorite clears 90% without 200 low-rated comparisons', () => {
+  const ranking = analyzeRanking([film('favorite', 1730), ...lows()], [{rating: 5, quota: 1}, {rating: 1, quota: 200}]);
+  assert.ok(ranking.tiers[0].confidence >= 90);
   assert.equal(ranking.tiers[0].finalized, true);
-  assert.equal(analyzeRanking(items, [{ rating: 5, quota: 1 }, { rating: 4, quota: 5 }], history).tiers[0].finalized, false);
+  assert.ok(![ranking.nextPair?.left.id, ranking.nextPair?.right.id].includes('favorite'));
 });
 
-test('legacy cycles cannot produce false confidence; missing films are ignored', () => {
-  const ranking = analyzeRanking(films(6), quotas, [win(0, 1), win(1, 2), win(2, 0), win(9, 0)]);
-  assert.equal(ranking.conflicts, 1);
-  assert.equal(ranking.confidence, 0);
-  assert.equal(ranking.topFourFinal, false);
+test('close favorites are tested before distant low-rated films and reach 90%', () => {
+  const items = [film('favorite', 1730), film('rival', 1720), ...lows()];
+  const quotas = [{rating: 5, quota: 1}, {rating: 4, quota: 1}, {rating: 1, quota: 200}];
+  const history = [];
+  let count = 0;
+  let ranking = analyzeRanking(items, quotas, history);
+  while (!ranking.tiers[0].finalized && count < 40) {
+    const pair = ranking.nextPair;
+    assert.deepEqual(new Set([pair.left.id, pair.right.id]), new Set(['favorite', 'rival']));
+    const a = items[0]; const b = items[1];
+    const expected = 1 / (1 + 10 ** ((b.elo - a.elo) / 400));
+    a.elo += 36 * (1 - expected); b.elo -= 36 * (1 - expected);
+    a.games += 1; b.games += 1;
+    history.push({winnerId: a.id, loserId: b.id, aId: a.id, bId: b.id});
+    count += 1;
+    ranking = analyzeRanking(items, quotas, history);
+  }
+  assert.ok(count < 40);
+  assert.ok(ranking.tiers[0].finalized);
+});
+
+test('tier confidence is whole-set probability; overall confidence averages film probabilities', () => {
+  const items = Array.from({length: 6}, (_, i) => film(`film-${i}`, 1500));
+  const ranking = analyzeRanking(items, [{rating: 5, quota: 3}, {rating: 1, quota: 3}]);
+  assert.ok(ranking.tiers[0].confidence < 15);
+  assert.ok(ranking.confidence > 40 && ranking.confidence < 60);
+  assert.equal(ranking.activeTier.rating, 5);
+  assert.ok(ranking.assignments.get(ranking.nextPair.left.id).rank <= 3);
+  assert.ok(ranking.assignments.get(ranking.nextPair.right.id).rank > 3);
+});
+
+test('skip, reload, and import order do not manufacture confidence', () => {
+  const items = Array.from({length: 6}, (_, i) => film(`film-${i}`, 1500));
+  const quotas = [{rating: 5, quota: 2}, {rating: 1, quota: 4}];
+  const initial = analyzeRanking(items, quotas);
+  const history = [{aId: initial.nextPair.left.id, bId: initial.nextPair.right.id, skipped: true}];
+  const skipped = analyzeRanking(items, quotas, history);
+  assert.notDeepEqual(new Set([skipped.nextPair.left.id, skipped.nextPair.right.id]), new Set([initial.nextPair.left.id, initial.nextPair.right.id]));
+  assert.deepEqual(skipped.assignments, initial.assignments);
+  assert.deepEqual(analyzeRanking([...items].reverse(), quotas).assignments, initial.assignments);
+  assert.deepEqual(analyzeRanking(items, quotas), initial);
+});
+
+test('90% is sufficient for top four; one tier does not imply a known order', () => {
+  const items = [film('a', 2400), film('b', 2100), film('c', 1800), film('d', 1500), film('e', 1200)];
+  const quotas = [{rating: 5, quota: 5}];
+  const ranking = analyzeRanking(items, quotas);
+  assert.equal(ranking.confidence, 100);
+  assert.ok(ranking.topFourConfidence >= 90 && ranking.topFourConfidence < 100);
+  assert.equal(ranking.topFourFinal, true);
+  assert.equal(ranking.nextPair, null);
+  const tied = analyzeRanking(items.map((f) => ({...f, elo: 1500})), quotas);
+  assert.equal(tied.confidence, 100);
+  assert.equal(tied.topFourFinal, false);
+  assert.ok(tied.nextPair);
+});
+
+test('new Elo evidence and curve edits can reopen an earlier tier', () => {
+  const items = [film('a', 1900), film('b', 1500), film('c', 1490)];
+  const quotas = [{rating: 5, quota: 1}, {rating: 1, quota: 2}];
+  assert.equal(analyzeRanking(items, quotas).tiers[0].finalized, true);
+  const upset = items.map((f) => f.id === 'a' ? {...f, elo: 1510} : f);
+  assert.equal(analyzeRanking(upset, quotas).tiers[0].finalized, false);
+  assert.equal(analyzeRanking(items, [{rating: 5, quota: 2}, {rating: 1, quota: 1}]).tiers[0].finalized, false);
+});
+
+test('changing preferences are accepted; uncertainty shrinks and tiny imports are valid', () => {
+  const items = [film('a', 1500), film('b', 1500)];
+  const history = [{winnerId: 'a', loserId: 'b'}, {winnerId: 'b', loserId: 'a'}];
+  assert.ok(analyzeRanking(items, twoTiers, history).nextPair);
+  assert.ok(eloDeviation(film('a',1500,20)) < eloDeviation(items[0]));
+  assert.equal(eloDeviation(film('a',1500,100000)),25);
+  for (const count of [0,1]) {
+    const ranking = analyzeRanking(items.slice(0,count), [{rating:5,quota:count}]);
+    assert.equal(ranking.nextPair,null);
+    assert.equal(ranking.topFourFinal,true);
+    assert.equal(ranking.confidence,count ? 100 : 0);
+  }
+});
+
+test('after five stars reaches the target, attention moves to the next tier', () => {
+  const ranking = analyzeRanking([film('favorite',2000),film('middle-a',1500),film('middle-b',1490)], [{rating:5,quota:1},{rating:4,quota:1},{rating:1,quota:1}]);
+  assert.equal(ranking.tiers[0].finalized,true);
+  assert.equal(ranking.activeTier.rating,4);
+  assert.deepEqual(new Set([ranking.nextPair.left.id,ranking.nextPair.right.id]), new Set(['middle-a','middle-b']));
 });

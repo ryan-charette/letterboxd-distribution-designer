@@ -1,113 +1,129 @@
-// Comparisons are constraints on a consistent, transitive preference order.
-// Elo only breaks ties between films whose relative order is not established.
+export const CONFIDENCE_TARGET = 0.9;
+const SAMPLE_COUNT = 1024;
+
+// Uncertainty in a film's latent preference strength, in Elo points. These
+// explicit modeling choices are estimates, not empirically calibrated odds.
+export function eloDeviation(film) {
+  return Math.max(25, 100 / Math.sqrt(1 + Math.max(0, film.games || 0) / 4));
+}
+
+function seedFor(id) {
+  let seed = 2166136261;
+  for (const ch of String(id)) seed = Math.imul(seed ^ ch.charCodeAt(0), 16777619);
+  return seed >>> 0 || 1;
+}
+function randomSource(id) {
+  let seed = seedFor(id);
+  return () => {
+    seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+    return ((seed >>> 0) + 0.5) / 4294967296;
+  };
+}
+const percent = (value) => Math.round(value * 1000) / 10;
+const pairKey = (a, b) => [a, b].sort().join('::');
+
 export function analyzeRanking(films, quotas, history = []) {
-  const byId = new Map(films.map((film) => [film.id, film]));
-  const edges = new Map(films.map((film) => [film.id, new Set()]));
-  function reachable(start, target) {
-    const seen = new Set();
-    const pending = [start];
-    while (pending.length) {
-      const id = pending.pop();
-      if (id === target) return true;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      pending.push(...edges.get(id));
-    }
-    return false;
-  }
-  let conflicts = 0;
-  for (const match of history) {
-    if (match.skipped || !byId.has(match.winnerId) || !byId.has(match.loserId)) continue;
-    if (reachable(match.loserId, match.winnerId)) {
-      conflicts += 1;
-      continue;
-    }
-    edges.get(match.winnerId).add(match.loserId);
-  }
-  const descendants = new Map();
-  const ancestors = new Map(films.map((film) => [film.id, new Set()]));
-  for (const film of films) {
-    const seen = new Set();
-    const pending = [...edges.get(film.id)];
-    while (pending.length) {
-      const id = pending.pop();
-      if (seen.has(id)) continue;
-      seen.add(id);
-      ancestors.get(id).add(film.id);
-      pending.push(...edges.get(id));
-    }
-    descendants.set(film.id, seen);
-  }
-  const bounds = new Map(films.map((film) => [film.id, {
-    min: ancestors.get(film.id).size + 1,
-    max: films.length - descendants.get(film.id).size,
-  }]));
-  // Kahn's algorithm produces an order respecting every accepted comparison.
-  const indegree = new Map(films.map((film) => [film.id, 0]));
-  for (const targets of edges.values()) for (const id of targets) indegree.set(id, indegree.get(id) + 1);
-  const available = films.filter((film) => indegree.get(film.id) === 0);
-  const sorted = [];
-  while (available.length) {
-    available.sort((a, b) => b.elo - a.elo || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
-    const film = available.shift();
-    sorted.push(film);
-    for (const id of edges.get(film.id)) {
-      indegree.set(id, indegree.get(id) - 1);
-      if (!indegree.get(id)) available.push(byId.get(id));
-    }
-  }
+  const sorted = [...films].sort((a, b) => b.elo - a.elo || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
   const assignments = new Map();
   const tiers = [];
+  const tierAtRank = [];
   let cursor = 0;
-  let confirmedCount = 0;
   for (const bucket of quotas) {
+    if (!bucket.quota) continue;
     const start = cursor;
     cursor += bucket.quota;
-    if (!bucket.quota) continue;
-    let finalized = !conflicts;
+    const tierIndex = tiers.length;
+    tiers.push({ ...bucket, start, end: cursor, hits: 0 });
     for (let i = start; i < cursor; i += 1) {
-      const film = sorted[i];
-      const bound = bounds.get(film.id);
-      const confirmed = !conflicts && bound.min > start && bound.max <= cursor;
-      if (confirmed) confirmedCount += 1;
-      else finalized = false;
-      assignments.set(film.id, { rating: bucket.rating, rank: i + 1, confirmed });
+      tierAtRank[i] = tierIndex;
+      assignments.set(sorted[i].id, { rating: bucket.rating, rank: i + 1, hits: 0, positionHits: 0 });
     }
-    tiers.push({ ...bucket, start, end: cursor, finalized });
   }
-  const topFourFinal = !conflicts && sorted.slice(0, 4).every((film) => {
-    const bound = bounds.get(film.id);
-    return bound.min === bound.max;
-  });
-  let boundary = tiers.find((tier) => !tier.finalized)?.end;
-  let stage = boundary === undefined ? "All rating tiers finalized." : `Finalizing ${tiers.find((tier) => !tier.finalized).rating}-star films, then moving down.`;
-  if (boundary === undefined && !topFourFinal) {
-    boundary = sorted.findIndex((film, index) => index < 4 && bounds.get(film.id).min !== bounds.get(film.id).max) + 1;
-    stage = `Determining top-four position ${boundary}.`;
+  const sources = sorted.map((film) => randomSource(film.id));
+  const deviations = sorted.map(eloDeviation);
+  const boundaryHits = new Array(sorted.length).fill(0);
+  const prefixHits = new Array(Math.min(4, sorted.length)).fill(0);
+  // Sample uncertain latent Elo strengths, then apply the exact target quotas.
+  // A single sampled strength is reused across all tiers within a simulation.
+  for (let sample = 0; sample < SAMPLE_COUNT; sample += 1) {
+    const order = sorted.map((film, index) => {
+      const normal = Math.sqrt(-2 * Math.log(sources[index]())) * Math.cos(2 * Math.PI * sources[index]());
+      return { index, strength: film.elo + normal * deviations[index] };
+    }).sort((a, b) => b.strength - a.strength || a.index - b.index);
+    const tierCorrect = tiers.map(() => true);
+    let maxOriginalRank = -1;
+    let prefixCorrect = true;
+    for (let rank = 0; rank < order.length; rank += 1) {
+      const originalIndex = order[rank].index;
+      const assignment = assignments.get(sorted[originalIndex].id);
+      if (tierAtRank[rank] === tierAtRank[originalIndex]) assignment.hits += 1;
+      else tierCorrect[tierAtRank[rank]] = false;
+      if (rank === originalIndex) assignment.positionHits += 1;
+      maxOriginalRank = Math.max(maxOriginalRank, originalIndex);
+      if (maxOriginalRank === rank) boundaryHits[rank] += 1;
+      prefixCorrect = prefixCorrect && rank === originalIndex;
+      if (rank < prefixHits.length && prefixCorrect) prefixHits[rank] += 1;
+    }
+    tierCorrect.forEach((correct, index) => { if (correct) tiers[index].hits += 1; });
   }
-  const skipCounts = new Map();
-  const key = (a, b) => [a, b].sort().join("::");
-  for (const match of history) if (match.skipped) {
-    const pair = key(match.aId, match.bId);
-    skipCounts.set(pair, (skipCounts.get(pair) || 0) + 1);
+  let confidenceSum = 0;
+  let confirmedCount = 0;
+  for (const assignment of assignments.values()) {
+    const probability = assignment.hits / SAMPLE_COUNT;
+    assignment.confidence = percent(probability);
+    assignment.positionConfidence = percent(assignment.positionHits / SAMPLE_COUNT);
+    assignment.confirmed = probability >= CONFIDENCE_TARGET;
+    confidenceSum += probability;
+    if (assignment.confirmed) confirmedCount += 1;
+    delete assignment.hits;
+    delete assignment.positionHits;
   }
-  let choice = null;
-  if (boundary !== undefined && boundary < films.length) {
-    // Only compare across the earliest unfinished cut. Prefer its weakest
-    // incumbent, then let every still-eligible challenger reach that cut.
-    for (let i = boundary - 1; i >= 0; i -= 1) {
+  for (const tier of tiers) {
+    tier.probability = tier.hits / SAMPLE_COUNT;
+    tier.confidence = percent(tier.probability);
+    tier.finalized = tier.probability >= CONFIDENCE_TARGET;
+    delete tier.hits;
+  }
+  const topFourProbability = prefixHits.length ? prefixHits[prefixHits.length - 1] / SAMPLE_COUNT : 1;
+  const topFourFinal = topFourProbability >= CONFIDENCE_TARGET;
+  const activeTier = tiers.find((tier) => !tier.finalized);
+  let boundary;
+  let stage = 'All tiers and the top four have reached 90% model confidence.';
+  if (activeTier) {
+    const cuts = [activeTier.start, activeTier.end].filter((cut) => cut > 0 && cut < sorted.length);
+    boundary = cuts.sort((a, b) => boundaryHits[a - 1] - boundaryHits[b - 1])[0];
+    stage = `Finalizing ${activeTier.rating}-star films: ${activeTier.confidence}% confidence in the entire tier (target 90%).`;
+  } else if (!topFourFinal) {
+    boundary = prefixHits.findIndex((hits) => hits / SAMPLE_COUNT < CONFIDENCE_TARGET) + 1;
+    stage = `Refining your top four: ${percent(topFourProbability)}% confidence in the ordered list (target 90%).`;
+  }
+  let nextPair = null;
+  if (boundary > 0 && boundary < sorted.length) {
+    const skips = new Map();
+    for (const match of history) if (match.skipped) {
+      const key = pairKey(match.aId, match.bId);
+      skips.set(key, (skips.get(key) || 0) + 1);
+    }
+    // Keep attention on this tier's cut. Distant low-rated films have an
+    // exponentially smaller challenge score; they do not need individual proof.
+    let bestScore = -Infinity;
+    for (let i = 0; i < boundary; i += 1) {
       for (let j = boundary; j < sorted.length; j += 1) {
-        const a = sorted[i];
-        const b = sorted[j];
-        if (descendants.get(a.id).has(b.id)) continue;
-        const skips = skipCounts.get(key(a.id, b.id)) || 0;
-        if (!choice || skips < choice.skips) choice = { left: a, right: b, skips };
+        const key = pairKey(sorted[i].id, sorted[j].id);
+        const gap = (sorted[i].elo - sorted[j].elo) / Math.hypot(deviations[i], deviations[j]);
+        const score = -gap * gap / 2 - (skips.get(key) || 0) * 2;
+        if (score > bestScore) {
+          bestScore = score;
+          nextPair = { left: sorted[i], right: sorted[j] };
+        }
       }
     }
+    // Alternate sides without changing confidence or which films are selected.
+    if (history.length % 2) nextPair = { left: nextPair.right, right: nextPair.left };
   }
   return {
-    sorted, quotas, assignments, bounds, tiers, topFourFinal, conflicts,
-    confirmedCount, confidence: films.length ? Math.floor(1000 * confirmedCount / films.length) / 10 : 0,
-    nextPair: conflicts ? null : choice, stage: conflicts ? "Resolve conflicting saved comparisons before continuing." : stage,
+    sorted, quotas, assignments, tiers, topFourFinal, topFourConfidence: percent(topFourProbability),
+    confirmedCount, confidence: sorted.length ? percent(confidenceSum / sorted.length) : 0,
+    nextPair, stage, activeTier, boundary,
   };
 }
