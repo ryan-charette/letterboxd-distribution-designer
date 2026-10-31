@@ -1,13 +1,12 @@
 import { performance } from 'node:perf_hooks';
-import { analyzeRanking } from '../src/ranking.js';
-const films = Array.from({length:2000}, (_, i) => ({id:`film-${i}`,title:`Film ${i}`,glicko:2000-i/2,rd:100,games:10}));
-const quotas = Array.from({length:10}, (_, i) => ({rating:5-i/2,quota:200}));
-analyzeRanking(films, quotas);
-const times = [];
-for(let i=0;i<15;i+=1) {
-  const start = performance.now();
-  analyzeRanking(films, quotas);
-  times.push(performance.now()-start);
-}
-times.sort((a,b)=>a-b);
-console.log(`${films.length} films: median ranking computation ${times[7].toFixed(2)} ms over 15 runs (excluding warm-up).`);
+import { analyzeRanking,sortFilms } from '../src/ranking.js';
+import { initialPreference } from '../src/preference-model.js';
+const count=1000;
+const films=Array.from({length:count},(_,i)=>({id:`film-${i}`,title:`Film ${i}`,...initialPreference({importedRating:.5+(i%10)*.5})}));
+const quotas=Array.from({length:10},(_,i)=>({rating:5-i*.5,quota:100}));
+function median(times){return times.sort((a,b)=>a-b)[Math.floor(times.length/2)].toFixed(2);}
+const cold=[];
+for(let i=0;i<7;i++){const start=performance.now();analyzeRanking(films,quotas);cold.push(performance.now()-start);}
+const sorted=sortFilms(films);analyzeRanking(sorted,quotas,[],{presorted:true});const warm=[];
+for(let i=0;i<15;i++){const start=performance.now();analyzeRanking(sorted,quotas,[],{presorted:true});warm.push(performance.now()-start);}
+console.log(JSON.stringify({films:count,newPosteriorMedianMs:median(cold),cachedCurveEditMedianMs:median(warm)}));

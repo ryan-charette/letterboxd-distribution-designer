@@ -1,181 +1,93 @@
 # Letterboxd Distribution Designer
 
-Design a target Letterboxd rating curve, upload a Letterboxd CSV export, compare films head-to-head, and export updated ratings based on your comparison results.
+Shape a target rating curve, import your Letterboxd CSV, answer comparisons, and export a probabilistic ranking at any time. The app gives favorites extra attention while maintaining broad coverage of the library.
 
-The app combines two workflows:
+Everything runs in your browser. CSV data, answers, and preferences remain local. This project is independently made and is not affiliated with Letterboxd.
 
-- A curve designer for shaping the rating distribution you want
-- A tier-by-tier comparison sorter for deciding which films belong in each rating band
+## Quick start
 
-Everything runs in the browser. Uploaded CSV data is parsed locally and session state is saved in local storage.
+Download the repository ZIP, unzip it, and open `letterboxd-distribution-designer.html`. No server or installation is required. The standalone file is rebuilt from the source.
 
-> This project is independently made and is not affiliated with Letterboxd.
+1. Shape the target curve and select whole-star or half-star bins.
+2. Upload `ratings.csv`, `watched.csv`, or `diary.csv`. Imported ratings provide useful prior information when available; `ratings.csv` is the recommended source for the time-budget goal.
+3. Choose a time budget and target model tier accuracy.
+4. Pick the film you prefer. Left/right arrow keys also work. Use Undo for accidental picks or Skip when you cannot decide.
+5. Export whenever the ranking is useful. Reaching the time budget makes results available without claiming that the accuracy target was reached.
 
-## Features
+## A ranking that can stop early
 
-- Drag curve control points to design a target ratings distribution
-- Use normal, left-skewed, right-skewed, and bimodal presets
-- Toggle whole-star or half-star rating bins
-- Preview how the curve maps to rating quotas
-- Upload Letterboxd `watched.csv`, `ratings.csv`, or `diary.csv`
-- Optionally seed Glicko from imported ratings when the CSV includes ratings
-- Pick preferred films in head-to-head comparisons
-- Finalize rating tiers from five stars downward before moving to the next tier
-- Identify the ordered top four using adjustable confidence intervals, even when several favorites share a tier
-- Settle films when their selected confidence interval lies entirely within their tier
-- Adjust confidence from 50% to 99% to trade comparison effort for interval strictness
-- Export a CSV with rank, assigned rating, Glicko, RD, tier probability, matches, wins, losses, imported rating, and Letterboxd URI
+The 1,200–3,600-answer quality goal is intended for an **imported, pre-seeded library**. Unseeded benchmarking is a separate stress test with a different expectation.
 
-## Demo
+The default budget is **60 minutes = 1,200 answered comparisons**, assuming three seconds per answer. The slider allows 5–180 minutes, up to **3,600 answers**. Pauses and skipped questions are outside this estimate. Increase the budget to continue an existing session.
 
-![Letterboxd Distribution Designer demo](./public/demo.gif)
+The quality target defaults to 90%. For each film, the app estimates the probability that it belongs in its currently assigned tier. Summing `1 - probability` gives the **expected number of misplaced films under the model**. The quality target is reached when average tier accuracy and average top-four membership probability both meet the target. The session stops when either the quality target or the time budget is reached. These are reported as different outcomes.
 
-## Run Without Installing
+Unlike a strict interval-containment rule, this allows some uncertainty to remain. The budget controls effort; achievable accuracy depends on imported ratings, answer consistency, and how similar the films are. A target is an aspiration, not a promise of real-world accuracy. Without imported ratings, 1,200–3,600 answers generally support a much coarser global ranking than they do with informative priors.
 
-You can run the app directly from the downloaded project zip.
+Results include a point rank, expected rank, model rank range (5th–95th percentiles), probabilities for every tier, and top-four membership probability. The four favorites are ordered by estimated preference; the stopping target concerns their membership, not certainty in their exact internal order. All probabilities remain provisional and can change with later evidence.
 
-1. Click **Code** > **Download ZIP** on GitHub.
-2. Unzip the download.
-3. Open `letterboxd-distribution-designer.html` in your browser.
+## Imperfect answers and the preference model
 
-No Node.js install, terminal commands, or web server are required for normal use.
+The model is an approximate Bayesian Bradley–Terry model with a lapse mixture, rather than a generic deterministic sorter. An answer never creates a hard ordering constraint. Cycles and upsets remain valid evidence, and later comparisons can repair earlier mistakes.
 
-## Developer Setup
+For latent preference scores `a` and `b`, the likelihood is `0.05 + 0.9 * sigmoid((a-b)/0.5)`. The lapse mixture leaves a 5% probability for an upset even at extreme score differences. Near-equal films are substantially harder to distinguish. This is an application modeling assumption, not an empirically fitted estimate of an individual user's error rate.
 
-### Prerequisites
+Imported ratings seed a normal prior with mean `(stars - 3) * 1.5` and standard deviation 0.4. Unseeded films start at mean zero and standard deviation 1.5. Each answer performs a soft Gaussian moment update. Every 25 answers, a global regularized fit revisits the comparison graph from the fixed priors, followed by a diagonal uncertainty approximation. Repeated pair evidence has weight proportional to the square root of the number of answers, so repeatedly clicking the same preference cannot manufacture unlimited independent evidence. Variance is floored at 0.025; the diagonal precision estimate is inflated by 1.25 and capped at the prior variance.
 
-- Node.js 18+
-- npm
+The posterior approximation ignores correlations and uses fixed noise/prior assumptions. Its probabilities are **model estimates, not calibrated guarantees**. The app samples 64 approximate posterior score orders, fills the target quotas in each, and estimates tier probabilities and rank ranges. Common random numbers make unchanged state reproducible. Changing the curve reuses the sampled orders instead of sorting the library again for every pointer movement.
 
-### Install
+Pair selection normally allocates 50% of turns to favorites/top-four uncertainty, 30% to important tier boundaries, and 20% to neglected films. Optimistic score estimates keep uncertain favorites eligible. During an unseeded cold start, half the turns go to coverage until every film has been considered. Opponents are chosen near the target's score using expected information and decision relevance, with a modest preference for reliable anchors and strong penalties for repeated/recent pairs. This is a practical acquisition heuristic, not a theorem of optimal sample efficiency.
+
+Background: [active top-K ranking with noisy comparisons](https://proceedings.mlr.press/v70/mohajer17a.html). This implementation is an application-specific approximate model and does not inherit that paper's recovery guarantees.
+
+## Color sources
+
+The primary accents are extracted directly from the SVG linked on [Letterboxd's official brand page](https://letterboxd.com/about/brand/):
+
+| Color | Hex |
+|---|---|
+| Green | `#00E054` |
+| Orange | `#FF8000` |
+| Blue | `#40BCF4` |
+
+Source asset: [official dots artwork](https://a.ltrbxd.com/logos/letterboxd-decal-dots-neg-rgb.svg). The brand page supplies artwork rather than a separate published hex table. Dark backgrounds `#14181C`, `#202830`, and `#2C3440`, and the slate text palette were verified against Letterboxd's [website stylesheet](https://s.ltrbxd.com/static/css/main-C1fpK60s.css). Additional accent tints are derived interface states, not claimed official brand specifications. The app keeps its own curve favicon and independent-project notice.
+
+## Data, migration, and export
+
+Common title, year, rating, date, and Letterboxd URI columns are supported. Duplicate films are deduplicated by URI when available, otherwise title and year. Rating quotas use largest-remainder rounding and always add up to the film count.
+
+Earlier Elo/Glicko sessions migrate by replaying the recorded answers into the new model. No older rating deviations are misrepresented as new posterior uncertainty. The previous saved keys remain available. The new session uses schema version 3 and separate quality/budget preferences; the old interval-confidence percentage is not silently interpreted as a new quality target.
+
+Undo rebuilds the most recent global-fit prefix and replays the remaining answers, restoring the posterior without replaying every prior global fit. Original per-film priors remain fixed even if the import checkbox is later toggled. New saves are debounced and flushed when leaving the page.
+
+CSV export always includes the complete library, even though the results table displays 100 films per page. Columns include the assigned rating, full tier-probability distribution, model rank range, expected rank, preference score and uncertainty, expected misplaced count, target and budget, match statistics, imported rating, and Letterboxd URI.
+
+## Development and validation
+
+Node.js 18+ and npm are required for source development.
 
 ```bash
 npm install
-```
-
-### Run Locally
-
-```bash
 npm run dev
-```
-
-Then open the local URL printed in your terminal.
-
-### Build
-
-```bash
-npm run build
-```
-
-### Build The Clickable HTML
-
-```bash
+npm test
 npm run build:standalone
 ```
 
-This regenerates `letterboxd-distribution-designer.html` from the production Vite bundle. Run it after source changes that should be included in the downloadable zip experience.
-
-### Preview Production Build
+The tests cover contradictory answers, correction of early mistakes, repeat-evidence discounting, exact replay across global-refit boundaries, legacy migration, budget stops, exploration, posterior probability identities, full tier distributions, pagination, and rendered controls and palette values.
 
 ```bash
-npm run preview
+npm run benchmark
+npm run benchmark:comparisons -- 1 seeded
+npm run benchmark:comparisons -- 2 weak
+npm run benchmark:comparisons -- 3 unseeded
 ```
 
-## How To Use
+The performance benchmark separates fresh-posterior computation from cached curve edits for 1,000 films. The comparison benchmark reports checkpoints at 0, 300, 1,200 and 3,600 answers, plus the supplied final checkpoint. An optional third argument limits answers, for example `npm run benchmark:comparisons -- 5 seeded 1200`.
 
-1. Shape the target ratings curve with the preset buttons and draggable curve points.
-2. Keep half-star ratings enabled for the classic 0.5 to 5.0 Letterboxd scale, or disable them for whole-star ratings.
-3. Upload a Letterboxd CSV export.
-4. Choose the film you prefer in each head-to-head pair. You can also use the left and right arrow keys.
-5. Follow the current tier until all its films have settled confidence intervals, then move down the scale. Zero-quota tiers are skipped.
-6. Once the tiers are finalized, finish any comparisons needed to order your top four.
-7. Export the updated ratings CSV, including per-film tier probabilities, top-four positions, and overall estimated tier accuracy.
+Simulated users answer probabilistically: `0.05 + 0.9 * sigmoid(true score difference / 0.35)`. True scores, prior rating errors, and names are generated from independent seeded draws; names carry no ranking information. The seeded scenario corrupts 15% of imported ratings by half a star, the weak scenario corrupts 40% and adds occasional large errors, and the unseeded scenario supplies no rating priors. The benchmark reports exact tier accuracy, accuracy within half a star, exact top-four/top-20 membership overlap, model estimates, and coverage separately. These are development simulations, not real-user or calibrated coverage validation. Quality can fluctuate after noisy answers; additional comparisons do not guarantee that every metric improves monotonically.
 
-## Supported CSV Columns
-
-The importer looks for common Letterboxd-style columns. It is intentionally flexible about column names.
-
-- Title: `Name`, `Title`, `Film`, or `Movie`
-- Year: `Year` or `Release Year`
-- Link: `Letterboxd URI`, `URI`, `URL`, or `Link`
-- Watched date: `Watched Date` or `Date`
-- Rating: `Rating`, `Stars`, or `Score`
-
-Rows without a recognizable title are skipped. Duplicate films are deduped by URI when available, otherwise by title and year.
-
-## How Ratings Are Assigned
-
-The curve is sampled into rating-bin probabilities. Those probabilities become quotas for the current film count using largest-remainder rounding, so the assigned counts still add up to the number of imported films.
-
-Films are ordered by their Glicko rating and assigned to the target quotas. The implementation uses [Glicko-1 as described by Mark Glickman](https://www.glicko.net/glicko/glicko.pdf), with each comparison treated as one rating period. Both films update from their pre-comparison rating and rating deviation (RD), without rounding stored values. RD is floored at 30; calendar-time inflation is disabled (`c = 0`) for this static film-ranking workflow.
-
-Unseeded films begin at rating 1500 with RD 350. When imported-rating seeding is enabled, the initial rating is `1500 + (imported stars - 3) * 115`, with RD 150. This narrower seeded RD is an application prior reflecting the imported preferences, not a universal Glicko default.
-
-### Settling tiers and the top four
-
-A tier cutoff is the midpoint of the Glicko ratings immediately above and below its quota boundary. Empty tiers are skipped; the highest and lowest tiers extend to positive and negative infinity respectively. A film is settled when its **selected central confidence interval lies strictly inside its assigned tier**. The settlement-confidence slider ranges from 50% to 99% and defaults to 95%. The interval is `rating ± z * RD`, where `z` is the standard normal quantile for the selected confidence. For example, 95% uses approximately `±1.96 RD`, 90% uses `±1.645 RD`, and 80% uses `±1.282 RD`. Lower confidence narrows the interval and relaxes the stopping rule; it does not change the underlying ratings, RD, or recorded answers. Touching a cutoff remains unsettled, including tied ratings. The app finalizes a tier when all its assigned films meet that rule, then moves downward. Tier progress is the percentage of assigned films whose intervals are settled.
-
-Pair selection focuses on the highest unfinished tier's relevant cutoff. It gathers nearby candidates on both sides plus reliable low-RD anchors. A bounded shortlist of at most 16 pairs is previewed under both possible answers, using simultaneous Glicko updates and Glicko's predictive outcome probability. The updated films are reinserted into the rating order and cutoffs are recomputed, so predicted progress includes boundary movement and possible changes in membership.
-
-The progress proxy combines the expected number of boundary films whose intervals clear the cutoff with the expected reduction in their normalized interval overlap. Expected RD reduction and anchor reliability break close scores. Same-side calibration requires a border film facing an anchor with at most half its RD. Conservative locality and minimum-improvement guards retain the closest cross-cut pair when speculative alternatives offer little benefit. This is bounded heuristic lookahead, not a globally optimal comparison policy, and it does not guarantee fewer comparisons on every library.
-
-After tiers settle, the ordered top four uses the same interval rule within each individual rank's midpoint boundaries, including the fourth/fifth cutoff. For fewer than four films, all available positions are considered. Both tier and top-four settlement use the slider setting. The selected per-rating interval confidence is not a joint probability guarantee for an entire tier or the ordered top-four list. Earlier tiers can reopen after new answers, undo, or a curve edit. Skips change pair preference without updating ratings or RD.
-
-### What the confidence percentage means
-
-The separate estimated tier-accuracy display retains the original interpretation: the estimated probability that a uniformly selected film is in its correct tier. For a film with rating `r`, RD `d`, and current tier boundaries `L` and `U`, its tier probability is `Phi((U-r)/d) - Phi((L-r)/d)`, where `Phi` is the standard normal CDF. Overall accuracy averages these probabilities. This is a normal approximation conditional on the current point-estimated cutoffs; it does not include uncertainty in the cutoffs themselves and is not an empirically calibrated guarantee.
-
-RD is one standard deviation; rating ± RD is approximately a 68% central interval, while rating ± 1.96 RD is approximately 95%. The interface and CSV distinguish the selected settlement threshold, the selected interval bounds, model probabilities, and interval-settlement progress. The slider preference is saved with the session; sessions without one start at 95%. Changing the slider recalculates settlement without replaying answers. Raising confidence can reopen tiers.
-
-### Saved sessions and performance
-
-Older saved sessions migrate automatically by replaying their comparison history from the selected imported-rating priors using Glicko. Undo snapshots are rebuilt with both rating and RD. New sessions save under a versioned Glicko key; the older saved data is retained. Migration may change the order because the rating algorithm has changed.
-
-Ranking no longer runs Monte Carlo simulations. The film order is memoized, tier analysis scans the list, candidate pair scoring is bounded, and results render 100 films per page while CSV export still includes every film. Curve sampling sorts control points once per batch. Saving is debounced by 250 ms and flushed when leaving the page, avoiding full-history serialization on every curve movement.
-
-A local Node benchmark on a synthetic 2,000-film library measured median ranking computation at about 486 ms for the preceding simulation implementation and roughly 3 ms for the current bounded-lookahead implementation. This measures computation, not end-to-end browser frame rate. Run `npm run benchmark` to measure the current implementation on the same synthetic library.
-
-`npm run benchmark:comparisons` compares the former closest-gap policy and the new policy at 95%, plus the new policy at 80%, across five fixed synthetic libraries. It reports comparison counts and correct top-tier membership after both tiers settle. The test uses deterministic preferences and explicit seeded rating errors/RDs, not real-user data. Results are mixed: expected-progress pairing can save comparisons or take more, while lower confidence generally reduces the stopping effort in these scenarios. Treat this as a reproducible diagnostic, not evidence of calibrated accuracy or universal comparison savings.
-
-### Validation
-
-```bash
-npm test
-```
-
-Tests verify the published Glicko numerical example, simultaneous participant updates, RD-aware undo and saved-session migration, strict interval containment, analytic probabilities, descending tier priority, distant-challenger avoidance, top-four settlement, bounded pair selection, predictive outcome weights, confidence quantiles and persistence, slider rendering, lower-confidence settlement, reliable-anchor availability, and rendered results pagination.
-
-## Data And Persistence
-
-- CSV parsing happens in the browser.
-- Imported films, curve settings, and match history are saved in local storage.
-- Use the app's clear/reset controls, or clear site data in your browser, to remove saved state.
-- Exported results are downloaded as `letterboxd-updated-ratings.csv`.
-
-## Project Structure
-
-```txt
-letterboxd-distribution-designer/
-|-- public/
-|   |-- demo.gif
-|   `-- favicon.svg
-|-- scripts/
-|   `-- build-standalone.mjs
-|-- src/
-|   |-- App.jsx
-|   |-- index.css
-|   `-- main.jsx
-|-- index.html
-|-- letterboxd-distribution-designer.html
-|-- package.json
-|-- postcss.config.js
-|-- README.md
-|-- tailwind.config.js
-`-- vite.config.js
-```
-
-`src/glicko.js` implements rating updates and saved-session migration. `src/ranking.js` contains interval settlement and analytic tier probabilities. `src/pairing.js` contains bounded expected-progress selection and anchor candidates. `tests/ranking.test.mjs` validates the ranking behavior.
+See `docs/benchmark-results.md` for the measured checkpoints and limitations. Performance figures describe computation rather than browser frame rate. Visual browser verification remains separate from rendered-markup tests.
 
 ## License
 
-MIT License. See `LICENSE` for details.
+MIT License. See `LICENSE`.

@@ -1,11 +1,12 @@
-import { initialGlicko, recordComparison, migrateSession } from "./glicko.js";
+import { initialPreference, recordAnswer, rebuildPreferences, migrateSession } from "./preference-model.js";
 import { analyzeRanking, sortFilms, DEFAULT_CONFIDENCE, normalizeConfidence } from "./ranking.js";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 
 const numberFormatter = new Intl.NumberFormat();
 const STAR = "\u2605";
 const HALF = "\u00bd";
-const STORAGE_KEY = "letterboxd-distribution-glicko-state-v2";
+const STORAGE_KEY = "letterboxd-distribution-preference-state-v3";
+const GLICKO_STORAGE_KEY = "letterboxd-distribution-glicko-state-v2";
 const LEGACY_STORAGE_KEY = "letterboxd-distribution-elo-state-v1";
 const CURVE_W = 640;
 const CURVE_H = 300;
@@ -383,7 +384,7 @@ function parseFilmsFromRows(rows, seedFromExistingRatings) {
       uri,
       watchedDate,
       importedRating,
-      ...initialGlicko({ importedRating }, seedFromExistingRatings),
+      ...initialPreference({ importedRating }, seedFromExistingRatings),
       games: 0,
       wins: 0,
       losses: 0,
@@ -444,7 +445,7 @@ function ControlButton({ active = false, children, onClick, disabled = false }) 
       disabled={disabled}
       className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
         active
-          ? "border-lime-500/80 bg-lime-500/15 text-lime-100"
+          ? "border-brand-500/80 bg-brand-500/15 text-brand-100"
           : "border-slate-700/80 bg-slate-900/70 text-slate-300 hover:border-slate-600 hover:bg-slate-800/80"
       }`}
     >
@@ -453,7 +454,7 @@ function ControlButton({ active = false, children, onClick, disabled = false }) 
   );
 }
 
-function ProgressBar({ value, color = "bg-lime-400" }) {
+function ProgressBar({ value, color = "bg-brand-400" }) {
   return (
     <div className="h-2 overflow-hidden rounded bg-slate-800">
       <div className={`h-full rounded ${color}`} style={{ width: `${clamp(value, 0, 100)}%` }} />
@@ -463,7 +464,7 @@ function ProgressBar({ value, color = "bg-lime-400" }) {
 
 function UploadPanel({ onChooseFile, onDropFile, seedFromExistingRatings, setSeedFromExistingRatings, uploadError }) {
   return (
-    <section className="rounded-lg border border-slate-800 bg-[#11161d] p-5 shadow-2xl shadow-black/25">
+    <section className="rounded-lg border border-slate-800 bg-[#202830] p-5 shadow-2xl shadow-black/25">
       <div className="mb-4 flex items-center justify-between gap-4">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Import</div>
@@ -491,10 +492,10 @@ function UploadPanel({ onChooseFile, onDropFile, seedFromExistingRatings, setSee
           type="checkbox"
           checked={seedFromExistingRatings}
           onChange={(event) => setSeedFromExistingRatings(event.target.checked)}
-          className="mt-1 h-4 w-4 accent-lime-400"
+          className="mt-1 h-4 w-4 accent-brand-400"
         />
         <span>
-          <span className="block font-semibold text-slate-100">Seed Glicko from imported ratings</span>
+          <span className="block font-semibold text-slate-100">Use imported ratings as a starting point</span>
           <span className="mt-1 block text-xs leading-5 text-slate-500">Ratings and diary exports start closer to your current order.</span>
         </span>
       </label>
@@ -508,12 +509,12 @@ function UploadPanel({ onChooseFile, onDropFile, seedFromExistingRatings, setSee
   );
 }
 
-function FilmChoiceCard({ film, assignment, onPick, side, confidenceLevel = DEFAULT_CONFIDENCE }) {
+function FilmChoiceCard({ film, assignment, onPick, side }) {
   return (
     <button
       type="button"
       onClick={() => onPick(film.id)}
-      className="min-h-64 w-full rounded-lg border border-slate-800 bg-slate-950/40 p-5 text-left shadow-lg shadow-black/15 transition hover:-translate-y-0.5 hover:border-lime-500/50 hover:bg-slate-950/65 focus:outline-none focus:ring-2 focus:ring-lime-400/50"
+      className="min-h-64 w-full rounded-lg border border-slate-800 bg-slate-950/40 p-5 text-left shadow-lg shadow-black/15 transition hover:-translate-y-0.5 hover:border-brand-500/50 hover:bg-slate-950/65 focus:outline-none focus:ring-2 focus:ring-brand-400/50"
     >
       <div className="flex h-full flex-col justify-between">
         <div>
@@ -521,7 +522,7 @@ function FilmChoiceCard({ film, assignment, onPick, side, confidenceLevel = DEFA
             <span className="rounded bg-slate-800 px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-slate-300">
               {side}
             </span>
-            <span className="rounded bg-lime-400/10 px-2.5 py-1 text-xs font-semibold text-lime-100">
+            <span className="rounded bg-brand-400/10 px-2.5 py-1 text-xs font-semibold text-brand-100">
               {ratingText(assignment?.rating) || "Unassigned"}
             </span>
           </div>
@@ -534,8 +535,8 @@ function FilmChoiceCard({ film, assignment, onPick, side, confidenceLevel = DEFA
 
         <div className="mt-8 grid grid-cols-3 gap-2 text-center">
           <div className="rounded bg-slate-900/90 px-3 py-2">
-            <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Glicko ± RD</div>
-            <div className="mt-1 text-sm font-semibold text-slate-100">{Math.round(film.glicko)} ± {Math.round(film.rd)}</div>
+            <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Tier chance</div>
+            <div className="mt-1 text-sm font-semibold text-slate-100">{assignment?.confidence}%</div>
           </div>
           <div className="rounded bg-slate-900/90 px-3 py-2">
             <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Matches</div>
@@ -546,7 +547,7 @@ function FilmChoiceCard({ film, assignment, onPick, side, confidenceLevel = DEFA
             <div className="mt-1 text-sm font-semibold text-slate-100">#{assignment?.rank ?? "-"}</div>
           </div>
         </div>
-        <p className="mt-3 text-xs text-slate-500">{confidenceLevel}% interval: {Math.round(assignment?.intervalLower)}–{Math.round(assignment?.intervalUpper)}</p>
+        <p className="mt-3 text-xs text-slate-500">Top-four membership estimate: {assignment?.topFourConfidence}%. You can revise any answer with Undo.</p>
       </div>
     </button>
   );
@@ -558,12 +559,18 @@ function persistSession(snapshot) {
   catch { /* Storage may be unavailable or full. */ }
 }
 
-export function ConfidenceControl({confidenceLevel, multiplier, onChange}) {
-  return <section className="rounded-lg border border-slate-800 bg-[#11161d] p-5">
-    <label htmlFor="settlement-confidence" className="flex justify-between gap-4 text-sm font-semibold text-slate-100"><span>Settlement confidence</span><span>{confidenceLevel}%</span></label>
-    <input id="settlement-confidence" type="range" min="50" max="99" step="1" value={confidenceLevel} onChange={event=>onChange(Number(event.target.value))} className="mt-4 w-full accent-lime-400" aria-describedby="confidence-help" />
-    <div className="flex justify-between text-xs text-slate-500"><span>50% · Faster</span><span>99% · More cautious</span></div>
-    <p id="confidence-help" className="mt-3 text-xs leading-5 text-slate-400">Settle films when rating ± {multiplier.toFixed(2)} RD fits inside their tier. Lower confidence usually needs fewer comparisons, with less reliable placements. Default: 95%.</p>
+export function ConfidenceControl({confidenceLevel, onChange, budgetMinutes = 60, onBudgetChange = () => {}}) {
+  return <section className="rounded-lg border border-slate-800 bg-[#202830] p-5 space-y-4">
+    <div>
+      <label htmlFor="quality-target" className="flex justify-between text-sm font-semibold"><span>Target model tier accuracy</span><span>{confidenceLevel}%</span></label>
+      <input id="quality-target" type="range" min="70" max="99" step="1" value={confidenceLevel} onChange={event=>onChange(Number(event.target.value))} className="mt-3 w-full accent-brand-400" aria-describedby="quality-help" />
+      <p id="quality-help" className="text-xs leading-5 text-slate-400">Aim for at most {100-confidenceLevel}% expected misplaced films, plus a similar target for top-four membership. These are approximate model estimates, not guarantees. Export useful results at any time.</p>
+    </div>
+    <div>
+      <label htmlFor="time-budget" className="flex justify-between text-sm font-semibold"><span>Time budget</span><span>{budgetMinutes} minutes · {budgetMinutes*20} comparisons</span></label>
+      <input id="time-budget" type="range" min="5" max="180" step="5" value={budgetMinutes} onChange={event=>onBudgetChange(Number(event.target.value))} className="mt-3 w-full accent-brand-400" aria-describedby="budget-help" />
+      <p id="budget-help" className="text-xs leading-5 text-slate-400">Assumes three seconds per answer. Stop at your budget even if the accuracy target is not reached; increase it to keep refining. Your favorites receive extra attention, with broad coverage preserved.</p>
+    </div>
   </section>;
 }
 
@@ -590,20 +597,22 @@ export const ResultsTable = React.memo(function ResultsTable({ ranking }) {
       Title: film.title,
       Year: film.year,
       "Assigned Rating": assignments.get(film.id)?.rating,
-      "Tier Interval Settled": assignments.get(film.id)?.confirmed ? "Yes" : "No",
+      "Meets Model Tier Target": assignments.get(film.id)?.confirmed ? "Yes" : "No",
       "Top Four Position": assignments.get(film.id)?.rank <= 4 ? assignments.get(film.id)?.rank : "",
-      "Top Four Intervals Settled": ranking.topFourFinal ? "Yes" : "No",
+      "Top Four Membership Probability (%)": assignments.get(film.id)?.topFourConfidence,
+      "Expected Rank": assignments.get(film.id)?.expectedRank,
+      "Rank 5th Percentile": assignments.get(film.id)?.rankLow,
+      "Rank 95th Percentile": assignments.get(film.id)?.rankHigh,
+      "Tier Probabilities": assignments.get(film.id)?.tierProbabilities.map(tier=>`${tier.rating}: ${(tier.probability*100).toFixed(1)}%`).join("; "),
+      "Expected Total Misplaced Films": ranking.expectedMisplacements,
       "Film Tier Confidence (%)": assignments.get(film.id)?.confidence,
-      "Assigned Tier Settled (%)": ranking.tiers.find((tier) => tier.rating === assignments.get(film.id)?.rating)?.progress,
+      "Assigned Tier Model Accuracy (%)": ranking.tiers.find((tier) => tier.rating === assignments.get(film.id)?.rating)?.progress,
       "Overall Tier Confidence (%)": ranking.confidence,
-      "Interval Confidence Level (%)": ranking.confidenceLevel,
-      "Selected Interval Lower": assignments.get(film.id)?.intervalLower,
-      "Selected Interval Upper": assignments.get(film.id)?.intervalUpper,
-      "Rating Deviation": film.rd,
-      "Rating Minus RD": film.glicko - film.rd,
-      "Rating Plus RD": film.glicko + film.rd,
+      "Target Model Accuracy (%)": ranking.confidenceLevel,
+      "Comparison Budget": ranking.comparisonBudget,
+      "Preference Score": film.mu,
+      "Preference Uncertainty": Math.sqrt(film.variance),
       "Changed From Imported": ratingChanged(film) ? "Yes" : "No",
-      Glicko: film.glicko,
       Matches: film.games,
       Wins: film.wins,
       Losses: film.losses,
@@ -614,7 +623,7 @@ export const ResultsTable = React.memo(function ResultsTable({ ranking }) {
   }
 
   return (
-    <section className="rounded-lg border border-slate-800 bg-[#11161d] p-5 shadow-2xl shadow-black/25">
+    <section className="rounded-lg border border-slate-800 bg-[#202830] p-5 shadow-2xl shadow-black/25">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Results</div>
@@ -636,7 +645,7 @@ export const ResultsTable = React.memo(function ResultsTable({ ranking }) {
               <th className="px-4 py-3">Assigned</th>
               <th className="px-4 py-3">Tier confidence</th>
               <th className="px-4 py-3">Changed</th>
-              <th className="px-4 py-3">Glicko ± RD</th>
+              <th className="px-4 py-3">Expected rank</th>
               <th className="px-4 py-3">Matches</th>
               <th className="px-4 py-3">W-L</th>
               <th className="px-4 py-3">Imported</th>
@@ -647,25 +656,25 @@ export const ResultsTable = React.memo(function ResultsTable({ ranking }) {
               const assignment = assignments.get(film.id);
               const changed = ratingChanged(film);
               return (
-                <tr key={film.id} className={`border-t border-slate-800 ${changed ? "bg-amber-950/30" : ""}`}>
-                  <td className="px-4 py-3 font-semibold text-slate-200">#{assignment?.rank}</td>
+                <tr key={film.id} className={`border-t border-slate-800 ${changed ? "bg-[#ff8000]/10" : ""}`}>
+                  <td className="px-4 py-3 font-semibold text-slate-200">#{assignment?.rank}<span className="block text-xs font-normal text-slate-500" title="Model rank range, 5th to 95th percentile">{assignment?.rankLow}–{assignment?.rankHigh}</span></td>
                   <td className="px-4 py-3">
                     <div className="font-medium text-slate-100">{film.title}</div>
                     <div className="text-xs text-slate-500">{film.year || "Year unknown"}</div>
                   </td>
                   <td className="px-4 py-3">
-                    <span className="rounded bg-lime-400/10 px-2.5 py-1 text-xs font-semibold text-lime-100">
+                    <span className="rounded bg-brand-400/10 px-2.5 py-1 text-xs font-semibold text-brand-100">
                       {ratingText(assignment?.rating)}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-slate-400">{assignment?.confidence}%<span className="block text-xs text-slate-500">{assignment?.confirmed ? "Interval settled" : "Interval crosses cut"}</span></td>
+                  <td className="px-4 py-3 text-slate-400">{assignment?.confidence}%<span className="block text-xs text-slate-500">{assignment?.confirmed ? "Meets target" : "Provisional"}</span></td>
                   <td className="px-4 py-3 text-slate-400">{changed ? "Yes" : film.importedRating ? "No" : "-"}</td>
-                  <td className="px-4 py-3 text-slate-300">{Math.round(film.glicko)} ± {Math.round(film.rd)}<span className="block text-xs text-slate-500">{ranking.confidenceLevel}%: {Math.round(assignment?.intervalLower)}–{Math.round(assignment?.intervalUpper)}</span></td>
+                  <td className="px-4 py-3 text-slate-300">{assignment?.expectedRank}</td>
                   <td className="px-4 py-3 text-slate-300">{film.games}</td>
                   <td className="px-4 py-3 text-slate-300">
                     {film.wins}-{film.losses}
                   </td>
-                  <td className={`px-4 py-3 ${changed ? "font-semibold text-amber-100" : "text-slate-400"}`}>
+                  <td className={`px-4 py-3 ${changed ? "font-semibold text-[#ff8000]" : "text-slate-400"}`}>
                     {film.importedRating ? ratingText(film.importedRating) : "-"}
                   </td>
                 </tr>
@@ -691,6 +700,7 @@ export default function App() {
   const [seedFromExistingRatings, setSeedFromExistingRatings] = useState(true);
   const [uploadError, setUploadError] = useState("");
   const [confidenceLevel, setConfidenceLevel] = useState(DEFAULT_CONFIDENCE);
+  const [budgetMinutes, setBudgetMinutes] = useState(60);
   const [hydrated, setHydrated] = useState(false);
   const pendingSaveRef = useRef(null);
 
@@ -701,8 +711,9 @@ export default function App() {
   const densitySamples = useMemo(() => sampleDensity(points, 280), [points]);
   const probabilities = useMemo(() => getBinProbabilities(points, binCount), [points, binCount]);
   const distribution = useMemo(() => distributionFromProbabilities(probabilities, binCount), [probabilities, binCount]);
+  const deferredDistribution = useDeferredValue(distribution);
   const orderedFilms = useMemo(() => sortFilms(films), [films]);
-  const ranking = useMemo(() => analyzeRanking(orderedFilms, quotasFor(orderedFilms.length, distribution), history, { presorted: true, confidenceLevel }), [orderedFilms, distribution, history, confidenceLevel]);
+  const ranking = useMemo(() => analyzeRanking(orderedFilms, quotasFor(orderedFilms.length, deferredDistribution), history, { presorted: true, confidenceLevel, budgetMinutes }), [orderedFilms, deferredDistribution, history, confidenceLevel, budgetMinutes]);
   const { assignments, quotas, sorted, nextPair } = ranking;
   const distributionMovieCount = sorted.length || Math.max(0, Number(sampleSize) || 0);
   const counts = useMemo(
@@ -747,14 +758,15 @@ export default function App() {
 
   useEffect(() => {
     try {
-      const saved = migrateSession(JSON.parse(localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY) || "null"));
+      const saved = migrateSession(JSON.parse(localStorage.getItem(STORAGE_KEY) || localStorage.getItem(GLICKO_STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY) || "null"));
       if (saved?.points?.length) setPoints(saved.points);
       if (typeof saved?.allowHalfStars === "boolean") setAllowHalfStars(saved.allowHalfStars);
       if (saved?.presetName) setPresetName(saved.presetName);
       if (Number.isFinite(saved?.sampleSize)) setSampleSize(saved.sampleSize);
       if (saved?.films?.length) setFilms(saved.films);
       if (saved?.history?.length) setHistory(saved.history);
-      setConfidenceLevel(normalizeConfidence(saved?.confidenceLevel));
+      setConfidenceLevel(normalizeConfidence(saved?.schemaVersion === 3 ? saved?.qualityTarget : undefined));
+      if (Number.isFinite(saved?.budgetMinutes)) setBudgetMinutes(Math.max(5, Math.min(180, saved.budgetMinutes)));
       if (typeof saved?.seedFromExistingRatings === "boolean") setSeedFromExistingRatings(saved.seedFromExistingRatings);
     } catch {
       // Ignore incompatible saved state.
@@ -765,10 +777,10 @@ export default function App() {
 
   useEffect(() => {
     if (!hydrated) return;
-    pendingSaveRef.current = { schemaVersion: 2, points, allowHalfStars, presetName, sampleSize, films, history, seedFromExistingRatings, confidenceLevel };
+    pendingSaveRef.current = { schemaVersion: 3, points, allowHalfStars, presetName, sampleSize, films, history, seedFromExistingRatings, qualityTarget: confidenceLevel, budgetMinutes };
     const timer = setTimeout(() => persistSession(pendingSaveRef.current), 250);
     return () => clearTimeout(timer);
-  }, [hydrated, points, allowHalfStars, presetName, sampleSize, films, history, seedFromExistingRatings, confidenceLevel]);
+  }, [hydrated, points, allowHalfStars, presetName, sampleSize, films, history, seedFromExistingRatings, confidenceLevel, budgetMinutes]);
 
   useEffect(() => {
     const flush = () => persistSession(pendingSaveRef.current);
@@ -921,14 +933,12 @@ export default function App() {
       const loser = current.find((film) => film.id === loserId);
       if (!winner || !loser) return;
 
-      const result = recordComparison(winner, loser, now);
-      setFilms(current.map((film) => film.id === winnerId ? result.winner : film.id === loserId ? result.loser : film));
-      setHistory((currentHistory) => [...currentHistory, {
-        ...result.match, aId: nextPair.left.id, bId: nextPair.right.id,
-      }]);
+      const result = recordAnswer(films, history, winnerId, loserId, now);
+      setFilms(result.films);
+      setHistory(result.history);
 
     },
-    [nextPair, films],
+    [nextPair, films, history],
   );
 
   useEffect(() => {
@@ -957,13 +967,10 @@ export default function App() {
   function undoLast() {
     const last = history[history.length - 1];
     if (!last) return;
-    setFilms((current) =>
-      current.map((film) => {
-        const previous = last.before?.[film.id];
-        return previous ? { ...film, ...previous } : film;
-      }),
-    );
-    setHistory((current) => current.slice(0, -1));
+    const remaining = history.slice(0, -1);
+    const result = rebuildPreferences(films, remaining, seedFromExistingRatings);
+    setFilms(result.films);
+    setHistory(result.history);
   }
 
   function reshufflePair() {
@@ -973,10 +980,6 @@ export default function App() {
       {
         aId: nextPair.left.id,
         bId: nextPair.right.id,
-        winnerId: null,
-        loserId: null,
-        before: {},
-        after: {},
         skipped: true,
         createdAt: Date.now(),
       },
@@ -999,7 +1002,7 @@ export default function App() {
   const tooltipHeight = 36;
 
   return (
-    <div className="min-h-screen bg-[#0b1016] px-4 py-6 text-slate-100 md:px-6 md:py-8">
+    <div className="min-h-screen bg-[#14181c] px-4 py-6 text-slate-100 md:px-6 md:py-8">
       <input
         ref={fileInputRef}
         type="file"
@@ -1014,7 +1017,7 @@ export default function App() {
       <div className="mx-auto max-w-7xl">
         <header className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <div className="text-xs font-semibold uppercase tracking-[0.28em] text-lime-400/80">
+            <div className="text-xs font-semibold uppercase tracking-[0.28em] text-brand-400/80">
               Letterboxd Ratings Lab
             </div>
             <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-50 md:text-4xl">
@@ -1031,7 +1034,7 @@ export default function App() {
         </header>
 
         <div className="mb-6 grid gap-6 xl:grid-cols-[1.24fr_0.76fr]">
-          <section className="rounded-lg border border-slate-800 bg-[#11161d] p-5 shadow-2xl shadow-black/25">
+          <section className="rounded-lg border border-slate-800 bg-[#202830] p-5 shadow-2xl shadow-black/25">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Curve editor</div>
@@ -1062,7 +1065,7 @@ export default function App() {
             </div>
 
             <div className="grid gap-4 lg:grid-cols-[1fr_220px]">
-              <div className="rounded-lg border border-slate-800/90 bg-[#0d1319] p-3">
+              <div className="rounded-lg border border-slate-800/90 bg-[#14181c] p-3">
                 <svg
                   ref={curveRef}
                   viewBox={`0 0 ${CURVE_W} ${CURVE_H}`}
@@ -1079,23 +1082,23 @@ export default function App() {
                 >
                   <defs>
                     <linearGradient id="curveFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#a3e635" stopOpacity="0.44" />
-                      <stop offset="100%" stopColor="#a3e635" stopOpacity="0.05" />
+                      <stop offset="0%" stopColor="#00e054" stopOpacity="0.44" />
+                      <stop offset="100%" stopColor="#00e054" stopOpacity="0.05" />
                     </linearGradient>
                     <linearGradient id="glowStroke" x1="0" y1="0" x2="1" y2="0">
-                      <stop offset="0%" stopColor="#64748b" />
-                      <stop offset="50%" stopColor="#bef264" />
-                      <stop offset="100%" stopColor="#64748b" />
+                      <stop offset="0%" stopColor="#8899aa" />
+                      <stop offset="50%" stopColor="#00e054" />
+                      <stop offset="100%" stopColor="#8899aa" />
                     </linearGradient>
                   </defs>
 
-                  <rect x="0" y="0" width={CURVE_W} height={CURVE_H} rx="8" fill="#0d1319" />
+                  <rect x="0" y="0" width={CURVE_W} height={CURVE_H} rx="8" fill="#14181c" />
                   <line
                     x1={curvePadding}
                     x2={CURVE_W - curvePadding}
                     y1={CURVE_H - curvePadding}
                     y2={CURVE_H - curvePadding}
-                    stroke="#334155"
+                    stroke="#445566"
                     strokeWidth="1.5"
                   />
                   <line
@@ -1103,7 +1106,7 @@ export default function App() {
                     x2={CURVE_W - curvePadding}
                     y1={curvePadding}
                     y2={curvePadding}
-                    stroke="#1f2937"
+                    stroke="#2c3440"
                     strokeWidth="1"
                   />
 
@@ -1112,7 +1115,7 @@ export default function App() {
                     y={curvePadding}
                     width={(CURVE_W - curvePadding * 2) / binCount}
                     height={CURVE_H - curvePadding * 2}
-                    fill="#bef264"
+                    fill="#00e054"
                     opacity="0.08"
                   />
 
@@ -1124,7 +1127,7 @@ export default function App() {
                     strokeWidth="4"
                     strokeLinecap="round"
                   />
-                  <path d={curveLinePath} fill="none" stroke="#f8fafc" strokeOpacity="0.5" strokeWidth="1.4" />
+                  <path d={curveLinePath} fill="none" stroke="#ffffff" strokeOpacity="0.5" strokeWidth="1.4" />
 
                   {points.map((point, index) => {
                     const screenPoint = getPointScreenPosition(point);
@@ -1138,8 +1141,8 @@ export default function App() {
                           cx={screenPoint.x}
                           cy={screenPoint.y}
                           r={isActivePoint ? 7 : inHighlightedBin ? 5.5 : 4.5}
-                          fill={isActivePoint ? "#bef264" : inHighlightedBin ? "#e5e7eb" : "#94a3b8"}
-                          stroke={isActivePoint ? "#365314" : "#111827"}
+                          fill={isActivePoint ? "#00e054" : inHighlightedBin ? "#ddeeff" : "#99aabb"}
+                          stroke={isActivePoint ? "#006629" : "#14181c"}
                           strokeWidth="2"
                           opacity="0.96"
                         />
@@ -1147,16 +1150,16 @@ export default function App() {
                     );
                   })}
 
-                  <text x={curvePadding} y={20} fill="#64748b" fontSize="11" letterSpacing="2">
+                  <text x={curvePadding} y={20} fill="#8899aa" fontSize="11" letterSpacing="2">
                     LOW RATINGS
                   </text>
-                  <text x={CURVE_W - curvePadding - 88} y={20} fill="#64748b" fontSize="11" letterSpacing="2">
+                  <text x={CURVE_W - curvePadding - 88} y={20} fill="#8899aa" fontSize="11" letterSpacing="2">
                     HIGH RATINGS
                   </text>
-                  <text x={curvePadding} y={CURVE_H - 8} fill="#bef264" fontSize="20">
+                  <text x={curvePadding} y={CURVE_H - 8} fill="#00e054" fontSize="20">
                     {STAR}
                   </text>
-                  <text x={CURVE_W - curvePadding - 64} y={CURVE_H - 8} fill="#bef264" fontSize="20">
+                  <text x={CURVE_W - curvePadding - 64} y={CURVE_H - 8} fill="#00e054" fontSize="20">
                     {STAR.repeat(5)}
                   </text>
                 </svg>
@@ -1168,7 +1171,7 @@ export default function App() {
                     type="checkbox"
                     checked={allowHalfStars}
                     onChange={(event) => setAllowHalfStars(event.target.checked)}
-                    className="h-4 w-4 accent-lime-400"
+                    className="h-4 w-4 accent-brand-400"
                   />
                   <span>Half-star steps</span>
                 </label>
@@ -1183,7 +1186,7 @@ export default function App() {
                     step="1"
                     value={sampleSize}
                     onChange={(event) => setSampleSize(Math.max(0, Number(event.target.value) || 0))}
-                    className="w-full rounded border border-slate-700 bg-slate-900/90 px-3 py-2 text-sm text-slate-100 outline-none ring-0 focus:border-lime-500/70"
+                    className="w-full rounded border border-slate-700 bg-slate-900/90 px-3 py-2 text-sm text-slate-100 outline-none ring-0 focus:border-brand-500/70"
                   />
                 </label>
 
@@ -1208,7 +1211,7 @@ export default function App() {
             </div>
           </section>
 
-          <ConfidenceControl confidenceLevel={confidenceLevel} multiplier={ranking.multiplier} onChange={setConfidenceLevel} />
+          <ConfidenceControl confidenceLevel={confidenceLevel} onChange={setConfidenceLevel} budgetMinutes={budgetMinutes} onBudgetChange={setBudgetMinutes} />
 
           <UploadPanel
             onChooseFile={() => fileInputRef.current?.click()}
@@ -1220,7 +1223,7 @@ export default function App() {
         </div>
 
         <div className="mb-6 grid gap-6 xl:grid-cols-2">
-          <section className="rounded-lg border border-slate-800 bg-[#11161d] p-5 shadow-2xl shadow-black/25">
+          <section className="rounded-lg border border-slate-800 bg-[#202830] p-5 shadow-2xl shadow-black/25">
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Distribution</div>
@@ -1229,18 +1232,18 @@ export default function App() {
               <div className="text-sm text-slate-400">{numberFormatter.format(totalCount)} films</div>
             </div>
 
-            <div className="relative rounded-lg border border-slate-800/90 bg-[#0d1319] p-3">
+            <div className="relative rounded-lg border border-slate-800/90 bg-[#14181c] p-3">
               <svg
                 viewBox={`0 0 ${BAR_W} ${BAR_H}`}
                 className="w-full overflow-visible"
                 onMouseLeave={() => setHoveredBin(null)}
               >
-                <rect x="0" y="0" width={BAR_W} height={BAR_H} rx="8" fill="#0d1319" />
+                <rect x="0" y="0" width={BAR_W} height={BAR_H} rx="8" fill="#14181c" />
 
-                <text x={barPadding.left} y="34" fill="#cbd5e1" fontSize="18" fontWeight="700" letterSpacing="3">
+                <text x={barPadding.left} y="34" fill="#ccddee" fontSize="18" fontWeight="700" letterSpacing="3">
                   RATINGS
                 </text>
-                <text x={BAR_W - barPadding.right} y="34" fill="#94a3b8" fontSize="16" textAnchor="end">
+                <text x={BAR_W - barPadding.right} y="34" fill="#99aabb" fontSize="16" textAnchor="end">
                   {numberFormatter.format(totalCount)}
                 </text>
                 <line
@@ -1248,7 +1251,7 @@ export default function App() {
                   x2={BAR_W - barPadding.right}
                   y1="52"
                   y2="52"
-                  stroke="#475569"
+                  stroke="#445566"
                   strokeOpacity="0.55"
                   strokeWidth="1.6"
                 />
@@ -1273,13 +1276,13 @@ export default function App() {
                         rx="4"
                         width={barWidth}
                         height={height}
-                        fill={isActive ? "#bef264" : "#64748b"}
+                        fill={isActive ? "#40bcf4" : "#8899aa"}
                       />
                       <text
                         x={x + barWidth / 2}
                         y={Math.max(72, y - 8)}
                         textAnchor="middle"
-                        fill={isActive ? "#ecfccb" : "#94a3b8"}
+                        fill={isActive ? "#ddeeff" : "#99aabb"}
                         fontSize="10"
                         fontWeight="600"
                       >
@@ -1294,14 +1297,14 @@ export default function App() {
                   x2={BAR_W - barPadding.right}
                   y1={BAR_H - barPadding.bottom}
                   y2={BAR_H - barPadding.bottom}
-                  stroke="#475569"
+                  stroke="#445566"
                   strokeOpacity="0.55"
                   strokeWidth="2"
                 />
-                <text x={barPadding.left} y={BAR_H - 8} fill="#bef264" fontSize="20">
+                <text x={barPadding.left} y={BAR_H - 8} fill="#00e054" fontSize="20">
                   {STAR}
                 </text>
-                <text x={BAR_W - barPadding.right - 64} y={BAR_H - 8} fill="#bef264" fontSize="20">
+                <text x={BAR_W - barPadding.right - 64} y={BAR_H - 8} fill="#00e054" fontSize="20">
                   {STAR.repeat(5)}
                 </text>
                 <g transform={`translate(${activeBarCenter}, ${Math.max(8, tooltipY)})`} className="pointer-events-none">
@@ -1311,10 +1314,10 @@ export default function App() {
                     width={tooltipWidth}
                     height={tooltipHeight}
                     rx="8"
-                    fill="#334155"
+                    fill="#445566"
                   />
-                  <polygon points={`-6,${tooltipHeight - 2} 6,${tooltipHeight - 2} 0,${tooltipHeight + 8}`} fill="#334155" />
-                  <text x="0" y="23" textAnchor="middle" fill="#f8fafc" fontSize="13" fontWeight="700">
+                  <polygon points={`-6,${tooltipHeight - 2} 6,${tooltipHeight - 2} 0,${tooltipHeight + 8}`} fill="#445566" />
+                  <text x="0" y="23" textAnchor="middle" fill="#ffffff" fontSize="13" fontWeight="700">
                     {activeTooltipText}
                   </text>
                 </g>
@@ -1322,12 +1325,12 @@ export default function App() {
             </div>
           </section>
 
-          <section className="rounded-lg border border-slate-800 bg-[#11161d] p-5 shadow-2xl shadow-black/25">
+          <section className="rounded-lg border border-slate-800 bg-[#202830] p-5 shadow-2xl shadow-black/25">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Current quotas</div>
                 <h2 className="mt-1 text-lg font-semibold text-slate-100">Ratings from the curve</h2>
-                {activeFilmCount > 0 && <p className="mt-1 text-xs text-slate-400">Film count · {confidenceLevel}% intervals settled. ✓ marks a fully settled tier.</p>}
+                {activeFilmCount > 0 && <p className="mt-1 text-xs text-slate-400">Film count · average probability of the assigned tier. ✓ marks the model target.</p>}
               </div>
               <div className="text-sm text-slate-400">{binCount} steps</div>
             </div>
@@ -1337,7 +1340,7 @@ export default function App() {
                   <div className="font-semibold text-slate-200">{ratingText(bucket.rating)}</div>
                   <div className="h-2 overflow-hidden rounded bg-slate-800">
                     <div
-                      className="h-full rounded bg-lime-400"
+                      className="h-full rounded bg-brand-400"
                       style={{ width: `${activeFilmCount ? (bucket.quota / activeFilmCount) * 100 : bucket.percentage}%` }}
                     />
                   </div>
@@ -1353,7 +1356,7 @@ export default function App() {
         {films.length ? (
           <div className="space-y-6">
             <div className="grid gap-6 xl:grid-cols-[1.35fr_0.65fr]">
-              <section className="rounded-lg border border-slate-800 bg-[#11161d] p-5 shadow-2xl shadow-black/25">
+              <section className="rounded-lg border border-slate-800 bg-[#202830] p-5 shadow-2xl shadow-black/25">
                 <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
                   <div>
                     <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Compare</div>
@@ -1373,26 +1376,24 @@ export default function App() {
                       film={nextPair.left}
                       assignment={assignments.get(nextPair.left.id)}
                       onPick={handlePick}
-                      confidenceLevel={confidenceLevel}
                       side="Choice A"
                     />
                     <FilmChoiceCard
                       film={nextPair.right}
                       assignment={assignments.get(nextPair.right.id)}
                       onPick={handlePick}
-                      confidenceLevel={confidenceLevel}
                       side="Choice B"
                     />
                   </div>
                 ) : (
                   <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-8 text-center text-slate-400">
-                    {activeFilmCount < 2 ? "Not enough films to compare." : "All tier intervals and top-four positions are settled."}
+                    {activeFilmCount < 2 ? "Not enough films to compare." : "Results are ready. Export now or adjust your targets to keep refining."}
                   </div>
                 )}
               </section>
 
               <aside className="space-y-6">
-                <section className="rounded-lg border border-slate-800 bg-[#11161d] p-5 shadow-2xl shadow-black/25">
+                <section className="rounded-lg border border-slate-800 bg-[#202830] p-5 shadow-2xl shadow-black/25">
                   <div className="mb-4 flex items-center justify-between gap-4">
                     <div>
                       <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Session</div>
@@ -1406,13 +1407,15 @@ export default function App() {
                         <span>Estimated tier accuracy</span><span>{ranking.confidence}%</span>
                       </div>
                       <ProgressBar value={ranking.confidence} />
-                      <p className="mt-2 text-xs leading-5 text-slate-400">A randomly selected film has an estimated {ranking.confidence}% chance of being in its correct tier under the Glicko normal approximation and current tier cutoffs. A film is settled when its selected {confidenceLevel}% interval fits entirely inside its tier. This setting controls interval width, not a guarantee for the entire tier; earlier tiers can reopen as ratings change.</p>
+                      <p className="mt-2 text-xs leading-5 text-slate-400">Under the approximate preference model, about {Math.round(ranking.expectedMisplacements)} films may belong in a different tier. The model estimates an average rating difference of {ranking.expectedStarError.toFixed(2)} stars. Every answer is fallible evidence. Results and probabilities update throughout the session; you do not need to finish to export.</p>
                     </div>
-                    <p className="text-sm text-slate-300">{matchCount} comparisons · {ranking.confirmedCount} of {activeFilmCount} films have settled tier intervals</p>
+                    <p className="text-sm text-slate-300">{matchCount} / {ranking.comparisonBudget} comparisons · about {Math.ceil(ranking.remainingMinutes)} minutes left at three seconds per answer</p>
                     <div className="text-sm text-slate-300">
                       <h3 className="font-semibold">Your top {Math.min(4, activeFilmCount)}</h3>
-                      <p className="my-2 text-xs text-slate-400">{ranking.topFourSettledCount} of {ranking.topFourCount} position intervals settled · {ranking.topFourFinal ? "Settled" : "Provisional"}</p>
-                      <ol className="list-inside list-decimal space-y-1">{sorted.slice(0, 4).map((film) => <li key={film.id}>{filmLabel(film)} {ranking.assignments.get(film.id)?.positionConfirmed ? "✓" : ""}</li>)}</ol>
+                      <p className="my-2 text-xs text-slate-400">{ranking.topFourConfidence}% average top-four membership probability · {ranking.topFourFinal ? "Model target met" : "Provisional order"}</p>
+                      <ol className="list-inside list-decimal space-y-1">{sorted.slice(0, 4).map((film) => <li key={film.id}>{filmLabel(film)} {`${ranking.assignments.get(film.id)?.topFourConfidence}%`}</li>)}</ol>
+                      <p className="mt-3 text-xs font-semibold text-slate-400">Other contenders</p>
+                      <ul className="mt-1 space-y-1 text-xs text-slate-400">{sorted.slice(4).filter(film=>assignments.get(film.id)?.topFourProbability>0).sort((a,b)=>assignments.get(b.id).topFourProbability-assignments.get(a.id).topFourProbability).slice(0,4).map(film=><li key={film.id}>{filmLabel(film)} · {assignments.get(film.id)?.topFourConfidence}%</li>)}</ul>
                     </div>
                   </div>
                 </section>
