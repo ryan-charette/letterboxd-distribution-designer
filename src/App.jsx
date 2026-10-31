@@ -574,7 +574,7 @@ export function ConfidenceControl({confidenceLevel, onChange, budgetMinutes = 60
   </section>;
 }
 
-export const ResultsTable = React.memo(function ResultsTable({ ranking }) {
+export const ResultsTable = React.memo(function ResultsTable({ ranking, pending = false }) {
   const { sorted, assignments } = ranking;
   const [requestedPage, setPage] = useState(0);
   const pageCount = Math.max(1, Math.ceil(sorted.length / 100));
@@ -629,7 +629,7 @@ export const ResultsTable = React.memo(function ResultsTable({ ranking }) {
           <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Results</div>
           <h2 className="mt-1 text-lg font-semibold text-slate-100">Updated Letterboxd ratings</h2>
         </div>
-        <ControlButton onClick={exportResults} disabled={!sorted.length}>Export CSV</ControlButton>
+        <ControlButton onClick={exportResults} disabled={!sorted.length || pending}>{pending ? "Updating estimates…" : "Export CSV"}</ControlButton>
       </div>
 
       <div className="mb-3 flex items-center justify-between gap-3 text-sm text-slate-400">
@@ -1422,7 +1422,7 @@ export default function App() {
               </aside>
             </div>
 
-            <ResultsTable ranking={ranking} />
+            <ResultsTable ranking={ranking} pending={distribution !== deferredDistribution} />
           </div>
         ) : null}
       </div>

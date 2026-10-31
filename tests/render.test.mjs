@@ -29,3 +29,10 @@ test('budget and quality targets are different controls with honest descriptions
  assert.match(html,/1200/);assert.match(html,/min="5"/);assert.match(html,/max="180"/);
  assert.match(html,/not guarantees/);assert.match(html,/Export useful results at any time/);
 });
+
+test('exports wait for a deferred curve update to finish',()=>{
+ const films=Array.from({length:4},(_,i)=>({id:`film-${i}`,title:`Film ${i}`,...initialPreference({importedRating:3})}));
+ const ranking=analyzeRanking(films,[{rating:5,quota:4}]);
+ const html=renderToString(React.createElement(ResultsTable,{ranking,pending:true}));
+ assert.match(html,/<button[^>]*disabled=""[^>]*>Updating estimates…<\/button>/);
+});
