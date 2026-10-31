@@ -1,11 +1,12 @@
-import { analyzeRanking } from "./ranking.js";
+import { initialGlicko, recordComparison, migrateSession } from "./glicko.js";
+import { analyzeRanking, sortFilms } from "./ranking.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const numberFormatter = new Intl.NumberFormat();
 const STAR = "\u2605";
 const HALF = "\u00bd";
-const STORAGE_KEY = "letterboxd-distribution-elo-state-v1";
-const INITIAL_ELO = 1500;
+const STORAGE_KEY = "letterboxd-distribution-glicko-state-v2";
+const LEGACY_STORAGE_KEY = "letterboxd-distribution-elo-state-v1";
 const CURVE_W = 640;
 const CURVE_H = 300;
 const BAR_W = 640;
@@ -73,7 +74,7 @@ function makePreset(kind, count = CONTROL_POINT_COUNT) {
 }
 
 function evaluateDensity(points, x) {
-  const sorted = [...points].sort((a, b) => a.x - b.x);
+  const sorted = points;
   if (x <= sorted[0].x) return sorted[0].y;
   if (x >= sorted[sorted.length - 1].x) return sorted[sorted.length - 1].y;
 
@@ -131,6 +132,7 @@ function repartitionPointXs(points, anchorIndex) {
 }
 
 function sampleDensity(points, sampleCount = 260) {
+  points = [...points].sort((a, b) => a.x - b.x);
   return Array.from({ length: sampleCount }, (_, index) => {
     const x = index / (sampleCount - 1);
     return { x, y: evaluateDensity(points, x) };
@@ -163,6 +165,7 @@ function getScreenPoints(samples, width, height, padding, yMax = CURVE_Y_MAX) {
 }
 
 function getBinProbabilities(points, binCount, sampleCount = 1400) {
+  points = [...points].sort((a, b) => a.x - b.x);
   const raw = Array(binCount).fill(0);
   let total = 0;
 
@@ -373,9 +376,6 @@ function parseFilmsFromRows(rows, seedFromExistingRatings) {
     if (seen.has(id)) return;
     seen.add(id);
 
-    const seededElo =
-      seedFromExistingRatings && importedRating ? INITIAL_ELO + (importedRating - 3) * 115 : INITIAL_ELO;
-
     films.push({
       id,
       title,
@@ -383,7 +383,7 @@ function parseFilmsFromRows(rows, seedFromExistingRatings) {
       uri,
       watchedDate,
       importedRating,
-      elo: Math.round(seededElo),
+      ...initialGlicko({ importedRating }, seedFromExistingRatings),
       games: 0,
       wins: 0,
       losses: 0,
@@ -393,22 +393,6 @@ function parseFilmsFromRows(rows, seedFromExistingRatings) {
   });
 
   return films;
-}
-
-function assignmentsFor(films, distribution, history = []) {
-  const active = films.filter((film) => !film.removed);
-  return analyzeRanking(active, quotasFor(active.length, distribution), history);
-}
-
-function expectedScore(a, b) {
-  return 1 / (1 + 10 ** ((b.elo - a.elo) / 400));
-}
-
-function kFactor(film) {
-  if (film.games < 5) return 48;
-  if (film.games < 15) return 36;
-  if (film.games < 35) return 28;
-  return 20;
 }
 
 function csvEscape(value) {
@@ -510,7 +494,7 @@ function UploadPanel({ onChooseFile, onDropFile, seedFromExistingRatings, setSee
           className="mt-1 h-4 w-4 accent-lime-400"
         />
         <span>
-          <span className="block font-semibold text-slate-100">Seed Elo from imported ratings</span>
+          <span className="block font-semibold text-slate-100">Seed Glicko from imported ratings</span>
           <span className="mt-1 block text-xs leading-5 text-slate-500">Ratings and diary exports start closer to your current order.</span>
         </span>
       </label>
@@ -550,8 +534,8 @@ function FilmChoiceCard({ film, assignment, onPick, side }) {
 
         <div className="mt-8 grid grid-cols-3 gap-2 text-center">
           <div className="rounded bg-slate-900/90 px-3 py-2">
-            <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Elo</div>
-            <div className="mt-1 text-sm font-semibold text-slate-100">{Math.round(film.elo)}</div>
+            <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Glicko ± RD</div>
+            <div className="mt-1 text-sm font-semibold text-slate-100">{Math.round(film.glicko)} ± {Math.round(film.rd)}</div>
           </div>
           <div className="rounded bg-slate-900/90 px-3 py-2">
             <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Matches</div>
@@ -567,8 +551,18 @@ function FilmChoiceCard({ film, assignment, onPick, side }) {
   );
 }
 
-function ResultsTable({ ranking }) {
+function persistSession(snapshot) {
+  if (!snapshot) return;
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot)); }
+  catch { /* Storage may be unavailable or full. */ }
+}
+
+export const ResultsTable = React.memo(function ResultsTable({ ranking }) {
   const { sorted, assignments } = ranking;
+  const [requestedPage, setPage] = useState(0);
+  const pageCount = Math.max(1, Math.ceil(sorted.length / 100));
+  const page = Math.min(requestedPage, pageCount - 1);
+  const visibleFilms = sorted.slice(page * 100, (page + 1) * 100);
 
   function ratingChanged(film) {
     const assigned = Number(assignments.get(film.id)?.rating);
@@ -586,15 +580,17 @@ function ResultsTable({ ranking }) {
       Title: film.title,
       Year: film.year,
       "Assigned Rating": assignments.get(film.id)?.rating,
-      "Film Tier At Least 90% Confident": assignments.get(film.id)?.confirmed ? "Yes" : "No",
+      "Tier Interval Settled": assignments.get(film.id)?.confirmed ? "Yes" : "No",
       "Top Four Position": assignments.get(film.id)?.rank <= 4 ? assignments.get(film.id)?.rank : "",
-      "Top Four Order At Least 90% Confident": ranking.topFourFinal ? "Yes" : "No",
+      "Top Four Intervals Settled": ranking.topFourFinal ? "Yes" : "No",
       "Film Tier Confidence (%)": assignments.get(film.id)?.confidence,
-      "Complete Assigned Tier Confidence (%)": ranking.tiers.find((tier) => tier.rating === assignments.get(film.id)?.rating)?.confidence,
+      "Assigned Tier Settled (%)": ranking.tiers.find((tier) => tier.rating === assignments.get(film.id)?.rating)?.progress,
       "Overall Tier Confidence (%)": ranking.confidence,
-      "Top Four Confidence (%)": ranking.topFourConfidence,
+      "Rating Deviation": film.rd,
+      "Rating Minus RD": film.glicko - film.rd,
+      "Rating Plus RD": film.glicko + film.rd,
       "Changed From Imported": ratingChanged(film) ? "Yes" : "No",
-      Elo: Math.round(film.elo),
+      Glicko: film.glicko,
       Matches: film.games,
       Wins: film.wins,
       Losses: film.losses,
@@ -614,6 +610,10 @@ function ResultsTable({ ranking }) {
         <ControlButton onClick={exportResults} disabled={!sorted.length}>Export CSV</ControlButton>
       </div>
 
+      <div className="mb-3 flex items-center justify-between gap-3 text-sm text-slate-400">
+        <span>{sorted.length ? page * 100 + 1 : 0}–{Math.min((page + 1) * 100, sorted.length)} of {sorted.length} films</span>
+        <div className="flex gap-2"><ControlButton disabled={page === 0} onClick={() => setPage(page - 1)}>Previous</ControlButton><ControlButton disabled={page + 1 >= pageCount} onClick={() => setPage(page + 1)}>Next</ControlButton></div>
+      </div>
       <div className="max-h-[520px] overflow-auto rounded-lg border border-slate-800">
         <table className="w-full min-w-[820px] text-sm">
           <thead className="sticky top-0 bg-slate-950 text-left text-xs uppercase tracking-[0.16em] text-slate-500">
@@ -623,14 +623,14 @@ function ResultsTable({ ranking }) {
               <th className="px-4 py-3">Assigned</th>
               <th className="px-4 py-3">Tier confidence</th>
               <th className="px-4 py-3">Changed</th>
-              <th className="px-4 py-3">Elo</th>
+              <th className="px-4 py-3">Glicko ± RD</th>
               <th className="px-4 py-3">Matches</th>
               <th className="px-4 py-3">W-L</th>
               <th className="px-4 py-3">Imported</th>
             </tr>
           </thead>
           <tbody>
-            {sorted.map((film) => {
+            {visibleFilms.map((film) => {
               const assignment = assignments.get(film.id);
               const changed = ratingChanged(film);
               return (
@@ -645,9 +645,9 @@ function ResultsTable({ ranking }) {
                       {ratingText(assignment?.rating)}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-slate-400">{assignment?.confidence}% {assignment?.confirmed ? "✓" : ""}</td>
+                  <td className="px-4 py-3 text-slate-400">{assignment?.confidence}%<span className="block text-xs text-slate-500">{assignment?.confirmed ? "Interval settled" : "Interval crosses cut"}</span></td>
                   <td className="px-4 py-3 text-slate-400">{changed ? "Yes" : film.importedRating ? "No" : "-"}</td>
-                  <td className="px-4 py-3 text-slate-300">{Math.round(film.elo)}</td>
+                  <td className="px-4 py-3 text-slate-300">{Math.round(film.glicko)} ± {Math.round(film.rd)}</td>
                   <td className="px-4 py-3 text-slate-300">{film.games}</td>
                   <td className="px-4 py-3 text-slate-300">
                     {film.wins}-{film.losses}
@@ -663,7 +663,7 @@ function ResultsTable({ ranking }) {
       </div>
     </section>
   );
-}
+});
 
 export default function App() {
   const [points, setPoints] = useState(() => makePreset("normal"));
@@ -677,6 +677,8 @@ export default function App() {
   const [history, setHistory] = useState([]);
   const [seedFromExistingRatings, setSeedFromExistingRatings] = useState(true);
   const [uploadError, setUploadError] = useState("");
+  const [hydrated, setHydrated] = useState(false);
+  const pendingSaveRef = useRef(null);
 
   const curveRef = useRef(null);
   const draggingPointRef = useRef(null);
@@ -685,7 +687,8 @@ export default function App() {
   const densitySamples = useMemo(() => sampleDensity(points, 280), [points]);
   const probabilities = useMemo(() => getBinProbabilities(points, binCount), [points, binCount]);
   const distribution = useMemo(() => distributionFromProbabilities(probabilities, binCount), [probabilities, binCount]);
-  const ranking = useMemo(() => assignmentsFor(films, distribution, history), [films, distribution, history]);
+  const orderedFilms = useMemo(() => sortFilms(films), [films]);
+  const ranking = useMemo(() => analyzeRanking(orderedFilms, quotasFor(orderedFilms.length, distribution), history, { presorted: true }), [orderedFilms, distribution, history]);
   const { assignments, quotas, sorted, nextPair } = ranking;
   const distributionMovieCount = sorted.length || Math.max(0, Number(sampleSize) || 0);
   const counts = useMemo(
@@ -730,7 +733,7 @@ export default function App() {
 
   useEffect(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+      const saved = migrateSession(JSON.parse(localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY) || "null"));
       if (saved?.points?.length) setPoints(saved.points);
       if (typeof saved?.allowHalfStars === "boolean") setAllowHalfStars(saved.allowHalfStars);
       if (saved?.presetName) setPresetName(saved.presetName);
@@ -740,27 +743,23 @@ export default function App() {
       if (typeof saved?.seedFromExistingRatings === "boolean") setSeedFromExistingRatings(saved.seedFromExistingRatings);
     } catch {
       // Ignore incompatible saved state.
+    } finally {
+      setHydrated(true);
     }
   }, []);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({
-          points,
-          allowHalfStars,
-          presetName,
-          sampleSize,
-          films,
-          history,
-          seedFromExistingRatings,
-        }),
-      );
-    } catch {
-      // Local storage can be unavailable in private contexts.
-    }
-  }, [points, allowHalfStars, presetName, sampleSize, films, history, seedFromExistingRatings]);
+    if (!hydrated) return;
+    pendingSaveRef.current = { schemaVersion: 2, points, allowHalfStars, presetName, sampleSize, films, history, seedFromExistingRatings };
+    const timer = setTimeout(() => persistSession(pendingSaveRef.current), 250);
+    return () => clearTimeout(timer);
+  }, [hydrated, points, allowHalfStars, presetName, sampleSize, films, history, seedFromExistingRatings]);
+
+  useEffect(() => {
+    const flush = () => persistSession(pendingSaveRef.current);
+    window.addEventListener("pagehide", flush);
+    return () => { window.removeEventListener("pagehide", flush); flush(); };
+  }, []);
 
   function applyPreset(kind) {
     setPresetName(kind);
@@ -907,66 +906,11 @@ export default function App() {
       const loser = current.find((film) => film.id === loserId);
       if (!winner || !loser) return;
 
-      const expectedWinner = expectedScore(winner, loser);
-      const expectedLoser = expectedScore(loser, winner);
-      const winnerK = kFactor(winner);
-      const loserK = kFactor(loser);
-      const winnerAfter = Math.round(winner.elo + winnerK * (1 - expectedWinner));
-      const loserAfter = Math.round(loser.elo + loserK * (0 - expectedLoser));
-
-      const updated = current.map((film) => {
-        if (film.id === winnerId) {
-          return {
-            ...film,
-            elo: winnerAfter,
-            games: film.games + 1,
-            wins: film.wins + 1,
-            lastPlayedAt: now,
-          };
-        }
-        if (film.id === loserId) {
-          return {
-            ...film,
-            elo: loserAfter,
-            games: film.games + 1,
-            losses: film.losses + 1,
-            lastPlayedAt: now,
-          };
-        }
-        return film;
-      });
-
-      setFilms(updated);
-      setHistory((currentHistory) => [
-        ...currentHistory,
-        {
-          aId: nextPair.left.id,
-          bId: nextPair.right.id,
-          winnerId,
-          loserId,
-          before: {
-            [winnerId]: {
-              elo: winner.elo,
-              games: winner.games,
-              wins: winner.wins,
-              losses: winner.losses,
-              lastPlayedAt: winner.lastPlayedAt,
-            },
-            [loserId]: {
-              elo: loser.elo,
-              games: loser.games,
-              wins: loser.wins,
-              losses: loser.losses,
-              lastPlayedAt: loser.lastPlayedAt,
-            },
-          },
-          after: {
-            [winnerId]: winnerAfter,
-            [loserId]: loserAfter,
-          },
-          createdAt: now,
-        },
-      ]);
+      const result = recordComparison(winner, loser, now);
+      setFilms(current.map((film) => film.id === winnerId ? result.winner : film.id === loserId ? result.loser : film));
+      setHistory((currentHistory) => [...currentHistory, {
+        ...result.match, aId: nextPair.left.id, bId: nextPair.right.id,
+      }]);
 
     },
     [nextPair, films],
@@ -1366,7 +1310,7 @@ export default function App() {
               <div>
                 <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Current quotas</div>
                 <h2 className="mt-1 text-lg font-semibold text-slate-100">Ratings from the curve</h2>
-                {activeFilmCount > 0 && <p className="mt-1 text-xs text-slate-400">Film count · confidence in the complete tier. ✓ marks the 90% target.</p>}
+                {activeFilmCount > 0 && <p className="mt-1 text-xs text-slate-400">Film count · rating ± RD intervals settled. ✓ marks a fully settled tier.</p>}
               </div>
               <div className="text-sm text-slate-400">{binCount} steps</div>
             </div>
@@ -1381,7 +1325,7 @@ export default function App() {
                     />
                   </div>
                   <div className="text-right text-slate-400">
-                    {activeFilmCount ? `${bucket.quota} · ${ranking.tiers.find((tier) => tier.rating === bucket.rating)?.confidence ?? 100}%${ranking.tiers.find((tier) => tier.rating === bucket.rating)?.finalized ? " ✓" : ""}` : `${bucket.percentage.toFixed(1)}%`}
+                    {activeFilmCount ? `${bucket.quota} · ${ranking.tiers.find((tier) => tier.rating === bucket.rating)?.progress ?? 100}%${ranking.tiers.find((tier) => tier.rating === bucket.rating)?.finalized ? " ✓" : ""}` : `${bucket.percentage.toFixed(1)}%`}
                   </div>
                 </div>
               ))}
@@ -1423,7 +1367,7 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-8 text-center text-slate-400">
-                    {activeFilmCount < 2 ? "Not enough films to compare." : "All tiers and the top four have reached 90% model confidence."}
+                    {activeFilmCount < 2 ? "Not enough films to compare." : "All tier intervals and top-four positions are settled."}
                   </div>
                 )}
               </section>
@@ -1443,13 +1387,13 @@ export default function App() {
                         <span>Estimated tier accuracy</span><span>{ranking.confidence}%</span>
                       </div>
                       <ProgressBar value={ranking.confidence} />
-                      <p className="mt-2 text-xs leading-5 text-slate-400">A randomly selected film has an estimated {ranking.confidence}% chance of being in its true tier under the Elo model. Each tier is finalized at 90% estimated confidence in its complete membership. These are model estimates, not guarantees; earlier tiers can reopen as Elo changes.</p>
+                      <p className="mt-2 text-xs leading-5 text-slate-400">A randomly selected film has an estimated {ranking.confidence}% chance of being in its correct tier under the Glicko normal approximation and current tier cutoffs. A film is settled when its rating ± RD fits entirely inside its tier. This interval rule is not a 90% guarantee; earlier tiers can reopen as ratings change.</p>
                     </div>
-                    <p className="text-sm text-slate-300">{matchCount} comparisons · {ranking.confirmedCount} of {activeFilmCount} films have at least 90% tier confidence</p>
+                    <p className="text-sm text-slate-300">{matchCount} comparisons · {ranking.confirmedCount} of {activeFilmCount} films have settled tier intervals</p>
                     <div className="text-sm text-slate-300">
                       <h3 className="font-semibold">Your top {Math.min(4, activeFilmCount)}</h3>
-                      <p className="my-2 text-xs text-slate-400">{ranking.topFourConfidence}% confidence in the ordered list · {ranking.topFourFinal ? "90% target reached" : "Provisional"}</p>
-                      <ol className="list-inside list-decimal space-y-1">{sorted.slice(0, 4).map((film) => <li key={film.id}>{filmLabel(film)} {ranking.assignments.get(film.id)?.positionConfidence >= 90 ? "✓" : ""}</li>)}</ol>
+                      <p className="my-2 text-xs text-slate-400">{ranking.topFourSettledCount} of {ranking.topFourCount} position intervals settled · {ranking.topFourFinal ? "Settled" : "Provisional"}</p>
+                      <ol className="list-inside list-decimal space-y-1">{sorted.slice(0, 4).map((film) => <li key={film.id}>{filmLabel(film)} {ranking.assignments.get(film.id)?.positionConfirmed ? "✓" : ""}</li>)}</ol>
                     </div>
                   </div>
                 </section>

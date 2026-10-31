@@ -18,12 +18,12 @@ Everything runs in the browser. Uploaded CSV data is parsed locally and session 
 - Toggle whole-star or half-star rating bins
 - Preview how the curve maps to rating quotas
 - Upload Letterboxd `watched.csv`, `ratings.csv`, or `diary.csv`
-- Optionally seed Elo from imported ratings when the CSV includes ratings
+- Optionally seed Glicko from imported ratings when the CSV includes ratings
 - Pick preferred films in head-to-head comparisons
 - Finalize rating tiers from five stars downward before moving to the next tier
-- Identify the ordered top four at 90% model confidence, even when several favorites share a tier
-- Track Elo-based tier probabilities and advance at 90% confidence
-- Export a CSV with rank, assigned rating, Elo, matches, wins, losses, imported rating, and Letterboxd URI
+- Identify the ordered top four using rating ± RD intervals, even when several favorites share a tier
+- Settle films when their rating ± RD lies entirely within their tier
+- Export a CSV with rank, assigned rating, Glicko, RD, tier probability, matches, wins, losses, imported rating, and Letterboxd URI
 
 ## Demo
 
@@ -86,7 +86,7 @@ npm run preview
 2. Keep half-star ratings enabled for the classic 0.5 to 5.0 Letterboxd scale, or disable them for whole-star ratings.
 3. Upload a Letterboxd CSV export.
 4. Choose the film you prefer in each head-to-head pair. You can also use the left and right arrow keys.
-5. Follow the current tier until its membership reaches 90% model confidence, then move down the scale. Zero-quota tiers are skipped.
+5. Follow the current tier until all its films have settled rating ± RD intervals, then move down the scale. Zero-quota tiers are skipped.
 6. Once the tiers are finalized, finish any comparisons needed to order your top four.
 7. Export the updated ratings CSV, including per-film tier probabilities, top-four positions, and overall estimated tier accuracy.
 
@@ -106,19 +106,31 @@ Rows without a recognizable title are skipped. Duplicate films are deduped by UR
 
 The curve is sampled into rating-bin probabilities. Those probabilities become quotas for the current film count using largest-remainder rounding, so the assigned counts still add up to the number of imported films.
 
-Films are ordered by Elo and assigned to the target rating quotas. Imported ratings can seed the initial Elo order. Each answer updates both films' Elo and match counts. Contradictory or changing preferences are treated as new Elo evidence rather than hard logical constraints.
+Films are ordered by their Glicko rating and assigned to the target quotas. The implementation uses [Glicko-1 as described by Mark Glickman](https://www.glicko.net/glicko/glicko.pdf), with each comparison treated as one rating period. Both films update from their pre-comparison rating and rating deviation (RD), without rounding stored values. RD is floored at 30; calendar-time inflation is disabled (`c = 0`) for this static film-ranking workflow.
 
-The app works from the highest nonempty tier downward. A tier is finalized when the model estimates at least a **90% probability that its entire membership is correct**. Pair selection focuses on plausible challengers across that tier's least-confident cutoff, favoring small Elo gaps relative to uncertainty. Very low-rated films do not require individual comparisons against favorites. Once the tiers reach the target, the app resolves the ordered top four to the same 90% threshold (or all films if fewer than four were imported).
+Unseeded films begin at rating 1500 with RD 350. When imported-rating seeding is enabled, the initial rating is `1500 + (imported stars - 3) * 115`, with RD 150. This narrower seeded RD is an application prior reflecting the imported preferences, not a universal Glicko default.
 
-Finalized means sufficiently confident, not permanently locked. Confidence is recomputed as Elo changes, so an earlier tier can reopen after an upset, an undo, or a curve edit. Skips add no Elo evidence and favor another pair at the same cutoff. If only one comparison remains useful, it may reappear.
+### Settling tiers and the top four
 
-### What confidence means
+A tier cutoff is the midpoint of the Glicko ratings immediately above and below its quota boundary. Empty tiers are skipped; the highest and lowest tiers extend to positive and negative infinity respectively. A film is settled when its **rating minus RD and rating plus RD both lie strictly inside its assigned tier**. Touching a cutoff remains unsettled, including tied ratings. The app finalizes a tier when all its assigned films meet that rule, then moves downward. Tier progress is the percentage of assigned films whose intervals are settled.
 
-The app draws 1,024 simulated preference orders from independent normal distributions centered at each film's current Elo. A film's standard deviation in Elo points is `max(25, 100 / sqrt(1 + matches / 4))`: new films have wider uncertainty, and comparisons narrow it. Imported Elo is used as an initial belief, so already-separated favorites and low-rated films need not be tested exhaustively. Disabling imported-rating seeding starts all films equally.
+Pair selection focuses on unsettled films in the highest unfinished tier and plausible challengers across the relevant cutoff. Each side contributes up to 12 candidates based on distance to the cutoff relative to RD; at most 144 pairs are scored. This includes uncertain challengers without requiring favorites to beat every distant low-rated film.
 
-Each simulated order fills the same target quotas. A film's tier confidence is the fraction of simulations placing it in its currently assigned tier. **Overall estimated tier accuracy** averages these probabilities: it estimates the chance that a uniformly selected film is in its true tier. A tier's confidence instead counts simulations where its *entire set* of films is correct. Top-four confidence counts simulations matching the *entire ordered top-four list*. These different quantities are labeled separately in the interface and CSV export.
+After tiers settle, the ordered top four uses the same interval rule within each individual rank's midpoint boundaries, including the fourth/fifth cutoff. For fewer than four films, all available positions are considered. These are interval-settlement criteria, not 90% probability thresholds. Earlier tiers can reopen after new answers, undo, or a curve edit. Skips change pair preference without updating ratings or RD.
 
-These are approximate model probabilities, not guarantees or empirically calibrated claims about a user's taste. The uncertainty formula is a modeling assumption, and simulation adds sampling error (roughly one percentage point near 90%). Sampling is deterministic for the same film IDs, Elo, and match counts, so skipping, reloading, or rearranging import rows does not itself increase confidence. All films participate in the simulations, including distant challengers, even though pair selection concentrates on plausible upsets.
+### What the confidence percentage means
+
+The separate estimated tier-accuracy display retains the original interpretation: the estimated probability that a uniformly selected film is in its correct tier. For a film with rating `r`, RD `d`, and current tier boundaries `L` and `U`, its tier probability is `Phi((U-r)/d) - Phi((L-r)/d)`, where `Phi` is the standard normal CDF. Overall accuracy averages these probabilities. This is a normal approximation conditional on the current point-estimated cutoffs; it does not include uncertainty in the cutoffs themselves and is not an empirically calibrated guarantee.
+
+RD is one standard deviation, so containment of rating ± RD is deliberately separate from the former 90% threshold. The interface and CSV distinguish model probabilities from interval-settlement progress.
+
+### Saved sessions and performance
+
+Older saved sessions migrate automatically by replaying their comparison history from the selected imported-rating priors using Glicko. Undo snapshots are rebuilt with both rating and RD. New sessions save under a versioned Glicko key; the older saved data is retained. Migration may change the order because the rating algorithm has changed.
+
+Ranking no longer runs Monte Carlo simulations. The film order is memoized, tier analysis scans the list, candidate pair scoring is bounded, and results render 100 films per page while CSV export still includes every film. Curve sampling sorts control points once per batch. Saving is debounced by 250 ms and flushed when leaving the page, avoiding full-history serialization on every curve movement.
+
+A local Node benchmark on a synthetic 2,000-film library measured median ranking computation at about 486 ms for the preceding simulation implementation and 1 ms for this implementation. This measures computation, not end-to-end browser frame rate. Run `npm run benchmark` to measure the current implementation on the same synthetic library.
 
 ### Validation
 
@@ -126,7 +138,7 @@ These are approximate model probabilities, not guarantees or empirically calibra
 npm test
 ```
 
-Tests check simulated probabilities against a two-film analytic reference, tier-level versus per-film confidence, descending tier priority, distant-challenger avoidance, skips, changing preferences, curve edits, and top-four confidence.
+Tests verify the published Glicko numerical example, simultaneous participant updates, RD-aware undo and saved-session migration, strict interval containment, analytic probabilities, descending tier priority, distant-challenger avoidance, top-four settlement, bounded pair selection, and rendered results pagination.
 
 ## Data And Persistence
 
@@ -157,7 +169,7 @@ letterboxd-distribution-designer/
 `-- vite.config.js
 ```
 
-`src/ranking.js` contains the Elo uncertainty model, tier probabilities, and pair selection. `tests/ranking.test.mjs` validates the ranking behavior.
+`src/glicko.js` implements rating updates and saved-session migration. `src/ranking.js` contains interval settlement, analytic tier probabilities, and pair selection. `tests/ranking.test.mjs` validates the ranking behavior.
 
 ## License
 
